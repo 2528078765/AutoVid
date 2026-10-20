@@ -18,6 +18,7 @@ pipwork/
 
 # 密钥
 config/secrets.json
+.commitmsg.txt
 
 # Python
 __pycache__/

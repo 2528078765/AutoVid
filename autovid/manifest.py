@@ -24,6 +24,7 @@ from typing import Any
 from .errors import ArtifactError, AutoVidError
 
 MANIFEST_NAME = "manifest.json"
+HISTORY_DELETED = ".history-deleted"
 ARTIFACT_DIR = "artifacts"
 STEPS_DIR = "steps"
 
@@ -235,7 +236,7 @@ class RunContext:
         pointer = out_dir / ".latest"
         if pointer.exists():
             target = out_dir / pointer.read_text(encoding="utf-8").strip()
-            if (target / MANIFEST_NAME).exists():
+            if (target / MANIFEST_NAME).exists() and not (target / HISTORY_DELETED).exists():
                 return cls.open(target, config)
         # 指针缺失、或指向已被删除的运行 -> 回退到最近一次有效运行
         runs = list_runs(config)
@@ -411,7 +412,8 @@ def list_runs(config: Any) -> list[dict[str, Any]]:
     runs: list[dict[str, Any]] = []
     for child in sorted(out_dir.iterdir(), reverse=True):
         manifest_path = child / MANIFEST_NAME
-        if not child.is_dir() or not manifest_path.exists():
+        if (not child.is_dir() or not manifest_path.exists()
+                or (child / HISTORY_DELETED).exists()):
             continue
         try:
             data = json.loads(manifest_path.read_text(encoding="utf-8"))

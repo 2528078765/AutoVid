@@ -134,12 +134,18 @@ class Runner:
         except Exception:  # noqa: BLE001
             pass
 
+    def requirements(self, step: StepDef) -> tuple[str, ...]:
+        """Disabled captions are not a required compose artifact (even on resume)."""
+        if step.name == "compose" and not self.config.step_enabled("subtitles"):
+            return tuple(key for key in step.requires if key != "subtitles")
+        return step.requires
+
     # ------------------------------------------------------------ hash
     def input_hash(self, step: StepDef) -> str:
         fingerprint = "|".join(
             f"{key}={self.config.fingerprint(key)}" for key in step.config_keys
         )
-        upstream = self.ctx.upstream_hashes(list(step.requires))
+        upstream = self.ctx.upstream_hashes(list(self.requirements(step)))
         extra: dict[str, Any] = {}
         inputs = self.ctx.manifest.get("inputs", {})
         if step.name == "topic":
@@ -201,7 +207,7 @@ class Runner:
         for step in selected:
             forced = "all" in force_set or step.name in force_set
             changed_upstream = list(dict.fromkeys(
-                producer[key] for key in step.requires
+                producer[key] for key in self.requirements(step)
                 if producer.get(key) in dirty and producer.get(key) in selected_names
             ))
             if forced:
@@ -334,7 +340,7 @@ class Runner:
             logger = StepLogger(step.name, self.log_dir, self.emitter)
             self.ctx.start_step(step.name, STEP_NAMES.index(step.name), step.version, h)
             try:
-                state = self.load_state(step.requires)
+                state = self.load_state(self.requirements(step))
                 step.fn(self.ctx, state, logger)
                 self.ctx.finish_step(step.name, STATUS_OK)
                 rec = self.ctx.get_step(step.name)

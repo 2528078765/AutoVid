@@ -16,6 +16,7 @@ import hashlib
 import http.client
 import json
 import random
+import re
 import shutil
 import socket
 import ssl
@@ -705,7 +706,18 @@ def tts_synthesize(
             log(f"  ✗ {name} 失败：{str(exc).splitlines()[0][:160]}")
     if strict and len(chain) == 1 and last_error is not None:
         first = str(last_error).strip().splitlines()[0]
-        raise ProviderError(f"语音 API「{primary}」失败：{first}") from last_error
+        detail = ""
+        try:
+            raw = json.loads(getattr(last_error, "body", b"").decode("utf-8"))
+            error = raw.get("error") if isinstance(raw.get("error"), dict) else raw
+            code, message = error.get("code"), error.get("message")
+            if code or message:
+                detail = "；云端原因：" + re.sub(r"https?://\S+|Bearer\s+\S+|sk-[A-Za-z0-9_-]+", "[已隐藏]",
+                                               f"{code or ''} {message or ''}")[:240]
+        except (ValueError, AttributeError, TypeError):
+            pass
+        raise ProviderError(f"语音服务失败：{first}{detail}",
+                            status=getattr(last_error,"status",None)) from last_error
     raise ProviderError("所有 TTS provider 都失败：\n  - " + "\n  - ".join(errors))
 
 
@@ -1028,6 +1040,37 @@ def _dashscope_oss_upload(
     return "oss://" + object_key
 
 
+def voice_requirements(config: Any, provider: str) -> dict[str, Any]:
+    """One read-only source for setup requirements; never includes API keys."""
+    cfg = config.provider_cfg("cloud_tts") if provider == "cloud_tts" else {}
+    if provider.startswith("voice:"):
+        from .providers_registry import resolve
+        resolved = resolve(config, provider)
+        cfg = resolved["cfg"] if resolved else {}
+    clone = cfg.get("clone") or {}
+    return {"model":str(cfg.get("model") or ""),
+            "reference_mode":"url" if clone.get("reference_mode") == "public_url" else "local",
+            "requires_reference_text":bool(clone.get("requires_reference_text")),
+            "max_reference_seconds":float(clone.get("max_audio_s") or 0)}
+
+
+def voice_setup_problems(config: Any, provider: str, asset: Any) -> list[str]:
+    requirements = voice_requirements(config,provider)
+    if asset is None:
+        return ["请先在音色库创建并选择音色"]
+    if requirements["reference_mode"] == "url":
+        if not getattr(asset,"cloud_reference_url",""):
+            return [f"音色「{asset.name}」缺少参考录音 HTTPS 直链，请到音色库填写；不需要配置 OSS"]
+    elif AssetStore(config).voice_reference(asset.id) is None:
+        return [f"音色「{asset.name}」缺少本地参考录音，请到音色库录音或上传"]
+    if requirements["requires_reference_text"] and not str(getattr(asset,"ref_text","") or "").strip():
+        return [f"音色「{asset.name}」缺少与录音完全一致的参考文字，请到音色库填写"]
+    maximum = requirements["max_reference_seconds"]
+    if (requirements["requires_reference_text"] or requirements["reference_mode"] == "url") and maximum and (asset.duration_s or 0) > maximum:
+        return [f"当前模型参考录音需不超过 {maximum:g} 秒，请准备较短录音和相应文字或链接"]
+    return []
+
+
 def register_voice(config: Any, voice_asset: Any, log=print) -> dict[str, Any]:
     """把音色资产「准备好」：云端则注册克隆，本地则校验参考音频。
 
@@ -1060,7 +1103,7 @@ def register_voice(config: Any, voice_asset: Any, log=print) -> dict[str, Any]:
         "note": "",
     }
 
-    if ref is None:
+    if ref is None and voice_requirements(config,provider)["reference_mode"] != "url":
         raise ProviderError(
             f"音色「{voice_asset.name}」没有参考音频，无法克隆。\n"
             "  请先在「音色库」里录音或上传一段（建议 10 秒以上）。"
@@ -1143,6 +1186,33 @@ def can_clone(provider: str, config: Any = None) -> bool:
     return bool(clone.get("enabled")) and bool(clone.get("url") or upload.get("url"))
 
 
+def _await_voice_ready(cfg: dict, cloud_id: str, context: dict, log) -> None:
+    """A returned voice ID is not proof that deployment has finished."""
+    ready = (cfg.get("clone") or {}).get("ready") or {}
+    if not ready:
+        return
+    context = {**context, "voice_id": cloud_id}
+    deadline = time.monotonic() + float(ready.get("timeout_s") or 120)
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ProviderError("音色部署等待超时，已保存音色 ID，下次会查询同一个音色，不会重复注册")
+        result = _http(str(_render_template(ready["url"], context)),
+                       _render_template(ready["body"], context),
+                       headers=_render_template(ready.get("headers") or {}, context),
+                       timeout_s=min(30, max(1, int(remaining))))
+        target = _dig(result, "output.target_model")
+        if target and target != cfg.get("model"):
+            raise ProviderError("云端音色绑定的模型与当前所选模型不一致，已停止合成")
+        status = str(_dig(result, "output.status") or "").upper()
+        if status == "OK":
+            return
+        if status != "DEPLOYING":
+            raise ProviderError(f"云端音色未就绪（状态 {status or '缺失'}），请检查参考录音或在音色库重新注册")
+        log("  音色正在部署，等待就绪…")
+        time.sleep(min(float(ready.get("interval_s") or 2), max(0, deadline - time.monotonic())))
+
+
 def _cloud_register_voice(config: Any, cfg: dict, log, voice_asset: Any,
                           api_key: str | None = None,
                           provider_name: str = "cloud_tts") -> str | None:
@@ -1159,14 +1229,10 @@ def _cloud_register_voice(config: Any, cfg: dict, log, voice_asset: Any,
     if not clone.get("enabled") or not (clone.get("url") or upload_cfg.get("url")):
         return None
 
-    cached = (getattr(voice_asset, "cloud_voice_ids", None) or {}).get(provider_name)
-    if cached:
-        log(f"  复用已注册的云端音色 ID：{cached}（不会重复克隆）")
-        return str(cached)
-
     store = AssetStore(config)
+    voice_asset = store.get_voice(voice_asset.id) or voice_asset
     ref = store.voice_reference(voice_asset.id)
-    if ref is None:
+    if ref is None and clone.get("reference_mode") != "public_url":
         raise ProviderError(
             f"音色「{voice_asset.name}」还没有参考音频，无法注册云端克隆"
         )
@@ -1175,46 +1241,92 @@ def _cloud_register_voice(config: Any, cfg: dict, log, voice_asset: Any,
     # 克隆只需要音色特征，几十秒足够，用户不必为此重录。
     # 参考文本：硅基流动等厂商的上传接口要求 text 与音频内容对应。
     # 之前 context 里压根没有 prompt_text，占位符渲染成空串（等于没给文本）。
-    ref_text = str(getattr(voice_asset, "ref_text", "")
-                   or getattr(voice_asset, "prompt_text", "") or "")
+    voice_asset = store.get_voice(voice_asset.id) or voice_asset
+    ref_text = str(getattr(voice_asset, "ref_text", "") or "").strip()
+    reference_url = str(getattr(voice_asset, "cloud_reference_url", "") or "").strip()
+    needs_text = bool(clone.get("requires_reference_text"))
+    if needs_text and not ref_text:
+        raise ProviderError("这个语音服务要求参考录音的准确文字。请在音色库填写实际朗读内容，不能套用默认模板。")
+    api_key = api_key or config.secret_for("cloud_tts", "AUTOVID_CLOUD_TTS_KEY")
+    fingerprint = hashlib.sha256((ref.read_bytes() if ref else b"") + json.dumps({
+        "text": ref_text, "clone": clone, "model": cfg.get("model"),
+        "endpoint": cfg.get("url"), "account": hashlib.sha256((api_key or "").encode()).hexdigest(),
+        "workspace": cfg.get("workspace_id"),
+        **({"reference_url": reference_url} if clone.get("reference_mode") == "public_url" else {}),
+    }, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    cache_key = provider_name
+    if clone.get("cache_by_model"):
+        account = hashlib.sha256(json.dumps({"key": api_key, "workspace": cfg.get("workspace_id"),
+                                            "endpoint": cfg.get("url")}, sort_keys=True).encode()).hexdigest()[:16]
+        cache_key = f"{provider_name}::{cfg.get('model')}::{account}"
+    # Refresh the asset: node_voice_clone and node_tts can hold different in-memory snapshots.
+    fresh = store.get_voice(voice_asset.id) or voice_asset
+    ids = getattr(fresh, "cloud_voice_ids", None) or {}
+    fingerprints = getattr(fresh, "cloud_voice_fingerprints", None) or {}
+    cached = ids.get(cache_key)
+    cached_fingerprint = fingerprints.get(cache_key)
+    # Migrate a valid old single-model cache without cloning again.
+    if not cached and fingerprints.get(provider_name) == fingerprint:
+        cached, cached_fingerprint = ids.get(provider_name), fingerprint
+    if cached and cached_fingerprint == fingerprint:
+        log(f"  复用已注册的云端音色 ID：{cached}（录音、文字、模型和账号一致）")
+        _await_voice_ready(cfg, str(cached), {**cfg, "api_key": api_key}, log)
+        return str(cached)
+    if cached:
+        log("  参考录音、文字、模型或账号已变化，或旧缓存缺少校验信息，将重新注册音色")
+
+    if clone.get("reference_mode") == "public_url" and not reference_url:
+        raise ProviderError("当前模型需要参考录音的 HTTPS 直链。请到音色库打开此音色，填写你本人录音的直接访问链接，不必配置 OSS。网盘分享页、网页和视频链接不能代替音频文件。")
 
     max_audio_s = float(clone.get("max_audio_s") or 0)
-    if max_audio_s > 0:
+    minimum = float(clone.get("min_audio_s") or 0)
+    if ref and minimum and M.wav_duration(ref) < minimum:
+        raise ProviderError(f"当前语音复刻模型要求参考录音至少 {minimum:g} 秒，请上传更长样本")
+    if ref and max_audio_s > 0:
         try:
-            import soundfile as sf  # noqa: PLC0415
-            data, rate = sf.read(str(ref), dtype="float32", always_2d=True)
-            limit = int(max_audio_s * rate)
-            if len(data) > limit:
-                ratio = limit / len(data)
-                trimmed = ref.parent / f"{ref.stem}_first{int(max_audio_s)}s.wav"
-                if not trimmed.exists():
-                    sf.write(str(trimmed), data[:limit], rate)
-                log(f"  参考音频 {len(data) / rate:.0f}s 超过上限 {max_audio_s:.0f}s，"
-                    f"已裁前 {max_audio_s:.0f}s 用于克隆")
-                ref = trimmed
-                if ref_text:
-                    # 文本也要按同样比例裁，否则文本与音频对不上，克隆质量会差
-                    ref_text = ref_text[:max(1, int(len(ref_text) * ratio))]
-                    log(f"  参考文本同步裁到 {len(ref_text)} 字")
+            import wave
+            with wave.open(str(ref), "rb") as reader:
+                rate = reader.getframerate()
+                duration = reader.getnframes() / rate
+                if duration > max_audio_s:
+                    if clone.get("reference_mode") == "public_url":
+                        raise ProviderError(f"当前模型要求公网参考录音不超过 {max_audio_s:g} 秒。请上传较短样本，并保存同一份样本的链接；本地裁剪不能改变云端链接的内容。")
+                    if needs_text:
+                        raise ProviderError(
+                            f"参考录音 {duration:.2f} 秒，超过当前服务的 {max_audio_s:g} 秒限制。"
+                            "请上传较短片段并填写该片段的准确文字；不再按时长比例猜测截断文字。")
+                    trimmed = ref.parent / f"ref_{fingerprint[:12]}_first{int(max_audio_s)}s.wav"
+                    params = reader.getparams()
+                    frames = reader.readframes(int(max_audio_s * rate))
+                    with wave.open(str(trimmed), "wb") as writer:
+                        writer.setparams(params)
+                        writer.writeframes(frames)
+                    ref = trimmed
+                    log(f"  参考录音 {duration:.2f} 秒，选取前 {max_audio_s:g} 秒用于克隆（原文件保留）")
         except ProviderError:
             raise
         except Exception as exc:  # noqa: BLE001
-            log(f"  ⚠ 裁剪参考音频失败（{type(exc).__name__}），按原样上传")
+            raise ProviderError(f"准备参考音频失败：{type(exc).__name__}，请重新上传标准 WAV 音频") from exc
 
-    api_key = api_key or config.secret_for("cloud_tts", "AUTOVID_CLOUD_TTS_KEY")
     context = {
         "api_key": api_key or "",
-        "voice_name": voice_asset.name,
+        # Cloud enrollment names are machine identifiers, not library display names.
+        # Use only ASCII letters/digits, stable across providers and retries (<64 chars).
+        # Existing saved templates using {{voice_name}} receive the same safe value.
+        "voice_name": "autovid" + hashlib.sha256(voice_asset.id.encode("utf-8")).hexdigest()[:24],
+        "voice_display_name": voice_asset.name,
         "prompt_text": ref_text,
         "ref_audio": str(ref),
-        "audio_base64": base64.b64encode(ref.read_bytes()).decode("ascii"),
-        "audio_format": ref.suffix.lstrip(".") or "wav",
+        "audio_base64": base64.b64encode(ref.read_bytes()).decode("ascii") if ref else "",
+        "audio_format": (ref.suffix.lstrip(".") or "wav") if ref else "wav",
         "voice_id": "",
         "model": str(cfg.get("model", "")),
         # 有些厂商要求自己指定一个新音色 ID（如 MiniMax 的 voice_id），给个合法默认值
         "new_voice_id": f"autovid{random.randint(10 ** 7, 10 ** 8 - 1)}",
         "upload_id": "",
+        "reference_url": reference_url,
     }
+    context.update({str(k): v for k, v in cfg.items() if isinstance(v, (str, int, float, bool))})
     timeout_s = int(cfg.get("timeout_s", 300))
 
     # 可选的第一步：先把参考音频上传拿到 file_id，再用它建音色。
@@ -1261,14 +1373,14 @@ def _cloud_register_voice(config: Any, cfg: dict, log, voice_asset: Any,
                 "clone.url 为空，且没有可用的上传步骤，拿不到音色 ID。\n"
                 "  这个模板需要配 clone.url（建音色接口）或 clone.upload.url（上传接口）。")
         cloud_id = context["upload_id"]
-        store.set_cloud_voice_id(voice_asset.id, provider_name, cloud_id)
+        store.set_cloud_voice_id(voice_asset.id, cache_key, cloud_id, fingerprint)
         log(f"  ✓ 音色 ID = {cloud_id}（上传即得，已缓存，后续不再重复上传）")
         return str(cloud_id)
 
     headers = _render_template(clone.get("headers") or {}, context)
     body = _render_template(clone.get("body") or {}, context)
     log(f"  正在向云端注册音色「{voice_asset.name}」…")
-    data = _http(str(clone["url"]), body, headers=headers, timeout_s=timeout_s)
+    data = _http(str(_render_template(clone["url"], context)), body, headers=headers, timeout_s=timeout_s)
     cloud_id = _dig(data, str(clone.get("voice_id_path") or "voice_id"))
     if not cloud_id:
         raise ProviderError(
@@ -1276,7 +1388,11 @@ def _cloud_register_voice(config: Any, cfg: dict, log, voice_asset: Any,
             f"'{clone.get('voice_id_path')}'）。原始响应：\n"
             f"{json.dumps(data, ensure_ascii=False)[:500]}"
         )
-    store.set_cloud_voice_id(voice_asset.id, provider_name, str(cloud_id))
+    if _dig(data, "output.fallback_mode") or _dig(data, "output.fallback_reason"):
+        raise ProviderError("声音复刻接口返回降级结果，未保存为你的克隆音色，请检查参考音频和模型权限")
+    store.set_cloud_voice_id(voice_asset.id, cache_key, str(cloud_id), fingerprint)
+    # Store before polling: a failed query must not cause another create_voice.
+    _await_voice_ready(cfg, str(cloud_id), context, log)
     log(f"  ✓ 云端克隆完成，音色 ID = {cloud_id}（已缓存，后续不再重复注册）")
     return str(cloud_id)
 
@@ -1332,7 +1448,8 @@ def _tts_cloud(config: Any, segments, out_dir: Path, log, voice_asset=None,
     """
     cfg = cfg if cfg is not None else config.provider_cfg("cloud_tts")
     out_dir.mkdir(parents=True, exist_ok=True)
-    url = str(cfg.get("url") or "")
+    url = str(_render_template(cfg.get("url") or "", {
+        str(k): v for k, v in cfg.items() if isinstance(v, (str, int, float, bool))}))
     if not url:
         raise ProviderError(
             "providers.cloud_tts.url 未配置。\n"
@@ -1722,6 +1839,28 @@ def _image_openai(config: Any, prompt: str, out: Path, index: int, log) -> None:
 # =========================================================================== #
 # 4. Avatar —— 数字人
 # =========================================================================== #
+def avatar_uses_scene_photo(config: Any, provider: str) -> bool:
+    """Whether this adapter drives the scene photo without a separate identity image."""
+    if provider == "local_wav2lip":
+        return True
+    if provider == "still":
+        return not bool(config.provider_cfg("avatar").get("use_identity_overlay", False))
+    if provider.startswith("avatar:"):
+        from .providers_registry import resolve  # noqa: PLC0415
+        custom = resolve(config, provider)
+        return bool(custom and custom["cfg"].get("use_scene_photo"))
+    return False
+
+
+def avatar_uses_source_video(config: Any, provider: str) -> bool:
+    """Input modality belongs to the adapter, not a frontend vendor-name check."""
+    if provider.startswith("avatar:"):
+        from .providers_registry import resolve
+        custom = resolve(config, provider)
+        return bool(custom and custom["cfg"].get("input_media") == "video")
+    return False
+
+
 def avatar_image_limits(config: Any, provider: str) -> Any:
     """这家数字人引擎对上传图片的硬约束。
 
@@ -1796,6 +1935,7 @@ def avatar_render(
     fps: int,
     log: Callable[[str], None] = print,
     portrait: Path | None = None,
+    source_video: Path | None = None,
 ) -> tuple[list[Path], str]:
     """返回 (每段的镜头片段, 实际使用的 provider)。
 
@@ -1818,10 +1958,15 @@ def avatar_render(
         if custom is None:
             raise ProviderError(f"设置里找不到提供商 {provider}（可能已被删除）")
         log(f"数字人 provider = {provider}（{custom['label']}）")
-        source_portrait = None if custom["cfg"].get("use_scene_photo") else portrait
-        clips = _avatar_template(config, segments, visuals, out_dir, log,
-                                 cfg=custom["cfg"], api_key=custom["api_key"],
-                                 provider_name=provider, portrait=source_portrait)
+        if custom["cfg"].get("protocol") == "videoretalk":
+            from .videoretalk import render
+            clips = render(source_video, segments, out_dir, custom["cfg"],
+                           custom["api_key"], provider, log)
+        else:
+            source_portrait = None if custom["cfg"].get("use_scene_photo") else portrait
+            clips = _avatar_template(config, segments, visuals, out_dir, log,
+                                     cfg=custom["cfg"], api_key=custom["api_key"],
+                                     provider_name=provider, portrait=source_portrait)
     elif provider == "http_job":
         clips = _avatar_http_job(config, segments, visuals, out_dir, log, portrait)
     elif provider == "minimax_h3":

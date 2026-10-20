@@ -17,6 +17,9 @@ import mimetypes
 import os
 import queue
 import re
+import shutil
+import sqlite3
+import tempfile
 import threading
 import traceback
 import zipfile
@@ -33,7 +36,7 @@ from ..assets import AssetStore
 from ..config import Config
 from ..errors import AutoVidError
 from ..graph import FLOW_NODES, GATE_TITLES, NODE_TITLES, VideoFlow
-from ..manifest import RunContext, list_runs
+from ..manifest import HISTORY_DELETED, RunContext, list_runs
 from ..pipeline import STEP_NAMES, STEPS, Runner
 from .. import providers as P
 from ..providers import provider_statuses
@@ -150,12 +153,11 @@ class Workbench:
         return self.config.path(self.config.get("project.out_dir", "runs"))
 
     def open_ctx(self, run_id: str) -> RunContext | None:
+        target = self.run_dir(run_id)
+        if target is None:
+            return None
         if run_id in self.sessions:
             return self.sessions[run_id].ctx
-        root = self._out_dir().resolve()
-        target = (root / run_id).resolve()
-        if target.parent != root:
-            return None
         if (target / "manifest.json").exists():
             try:
                 return RunContext.open(target, self.config)
@@ -169,14 +171,73 @@ class Workbench:
         LangGraph 流程不写 manifest.json，所以不能只靠 open_ctx ——
         这里兜底直接看目录是否存在。
         """
-        ctx = self.open_ctx(run_id)
-        if ctx is not None:
-            return ctx.dir
-        root = self._out_dir().resolve()
-        target = (root / run_id).resolve()
-        if target.parent != root:
+        return self._resolve_run_dir(run_id)
+
+    def _resolve_run_dir(self, run_id: str, include_deleted: bool = False) -> Path | None:
+        """只接受运行根目录的普通直接子目录，拒绝根目录、内部索引和链接。"""
+        if (not run_id or run_id.startswith((".", "_"))
+                or any(char in run_id for char in '/\\:')):
             return None
-        return target if target.is_dir() else None
+        root = self._out_dir().resolve()
+        candidate = root / run_id
+        if candidate.is_symlink() or getattr(candidate, "is_junction", lambda: False)():
+            return None
+        target = candidate.resolve()
+        if target != candidate or target.parent != root or not target.is_dir():
+            return None
+        if not include_deleted and (target / HISTORY_DELETED).exists():
+            return None
+        return target
+
+    def delete_run(self, run_id: str, delete_files: bool = False) -> dict[str, Any]:
+        """默认只移除历史记录，勾选后清理该运行目录及对应检查点。"""
+        with self._lock:
+            session = self.sessions.get(run_id)
+            if self._active_run == run_id or (session and not session.finished):
+                raise RuntimeError("这次任务正在运行，请等它结束后再删除。")
+            base = self._resolve_run_dir(run_id, include_deleted=True)
+            if base is None or not any((base / name).exists() for name in
+                                      ("manifest.json", "flow_state.json", "_logs/flow-error.log")):
+                raise FileNotFoundError("找不到这条运行记录。")
+            directory = str(base)
+            if delete_files:
+                checkpoint = self._out_dir().resolve() / "_graph" / "flow.sqlite"
+                connection = None
+                try:
+                    if checkpoint.is_file():
+                        if checkpoint.resolve() != checkpoint:
+                            raise AutoVidError("检查点路径不是本地运行目录中的普通文件。")
+                        connection = sqlite3.connect(str(checkpoint), timeout=5)
+                        # 只删除这一运行的 SqliteSaver 数据；文件清理失败则回滚。
+                        connection.execute("BEGIN IMMEDIATE")
+                        for table in ("checkpoints", "writes"):
+                            if connection.execute(
+                                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                                (table,),
+                            ).fetchone():
+                                connection.execute(f"DELETE FROM {table} WHERE thread_id=?",
+                                                   (f"flow-{run_id}",))
+                    shutil.rmtree(base)
+                    if connection is not None:
+                        connection.commit()
+                finally:
+                    if connection is not None:
+                        connection.close()
+            else:
+                marker = base / HISTORY_DELETED
+                with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", prefix=HISTORY_DELETED, dir=base, delete=False,
+                ) as handle:
+                    temporary = Path(handle.name)
+                    handle.write(datetime.now().astimezone().isoformat(timespec="seconds"))
+                try:
+                    # replace 不会沿旧标记的符号链接覆盖其他文件。
+                    temporary.replace(marker)
+                finally:
+                    temporary.unlink(missing_ok=True)
+            self.sessions.pop(run_id, None)
+            return {"ok": True, "run_id": run_id, "files_deleted": delete_files,
+                    "directory": directory}
 
     def flow_state(self, run_id: str) -> dict[str, Any]:
         """读流程写下的状态快照（用于回看历史运行）。"""
@@ -230,6 +291,7 @@ class Workbench:
         overrides: dict[str, Any],
         gates: list[str],
         scene_photo: str = "",
+        source_video: str = "",
     ) -> RunSession:
         """启动一次 LangGraph 流程（前置判断在图里做，这里不做拦截）。"""
         with self._lock:
@@ -258,6 +320,7 @@ class Workbench:
             "avatar_id": str(cfg.get("project.avatar_id", "") or ""),
             # 本次场景照片：提供画面与背景，每次换一张背景就不同
             "scene_photo": str(scene_photo or ""),
+            "source_video": str(source_video or ""),
             "revision": 0,
             "approvals": {},
             "trace": [],
@@ -294,13 +357,18 @@ class Workbench:
                                  run_dir=str(self.run_dir(run_id) or ""),
                                  flow_thread=state.get("thread_id") or f"flow-{run_id}")
             with self._lock:
+                if self._active_run is not None:
+                    raise RuntimeError(f"已有任务在运行（{self._active_run}）。")
+                if self.run_dir(run_id) is None:
+                    raise AutoVidError("这条运行记录已删除。")
                 self.sessions[run_id] = session
-            with self._lock:
                 self._active_run = run_id
         else:
             with self._lock:
-                if self._active_run is not None and self._active_run != run_id:
+                if self._active_run is not None:
                     raise RuntimeError(f"已有任务在运行（{self._active_run}）。")
+                if self.run_dir(run_id) is None:
+                    raise AutoVidError("这条运行记录已删除。")
                 self._active_run = run_id
             session.finished = False
             session.flow_status = ""
@@ -345,14 +413,18 @@ class Workbench:
             run_id=run_id, mode="flow", run_dir=str(base),
             flow_thread=str(snapshot.get("thread_id") or f"flow-{run_id}"),
         )
-        session.events.clear()
-        session.finished = False
-        session.ok = False
-        session.error = None
-        session.flow_status = ""
-        session.gate = None
-        session.current_step = ""
         with self._lock:
+            if self._active_run is not None:
+                raise RuntimeError(f"已有任务在运行（{self._active_run}）。")
+            if self.run_dir(run_id) is None:
+                raise AutoVidError("这条运行记录已删除。")
+            session.events.clear()
+            session.finished = False
+            session.ok = False
+            session.error = None
+            session.flow_status = ""
+            session.gate = None
+            session.current_step = ""
             self.sessions[run_id] = session
             self._active_run = run_id
         threading.Thread(
@@ -575,6 +647,7 @@ class Workbench:
             "steps": [{"name": s.name, "title": s.title, "index": i}
                       for i, s in enumerate(STEPS, start=1)],
             "current": current,
+            "generation_options": {"subtitles_enabled": self.config.step_enabled("subtitles")},
             # 前端要靠这个把「你的音色 / 你的形象」默认选中，
             # 否则每次进页面都得手动重选一遍（而且容易忘了选形象）。
             "project": {
@@ -604,6 +677,7 @@ class Workbench:
             },
             "runs": self.runs(),
             "active_run": self.active_run,
+            "history_actions": {"delete": True, "delete_files": True},
         }
 
     def runs(self, limit: int = 30) -> list[dict[str, Any]]:
@@ -611,6 +685,8 @@ class Workbench:
         out: list[dict[str, Any]] = []
         seen: set[str] = set()
         for item in items:
+            if self.run_dir(item["run_id"]) is None:
+                continue
             ctx = self.open_ctx(item["run_id"])
             result = build_result(ctx) if ctx else {}
             seen.add(item["run_id"])
@@ -622,6 +698,9 @@ class Workbench:
                 "video": result.get("video"),
                 "cover": result.get("cover"),
                 "duration_s": result.get("duration_s"),
+                "directory": str(item["dir"]),
+                "running": self.active_run == item["run_id"] or not getattr(
+                    self.sessions.get(item["run_id"]), "finished", True),
             })
 
         # LangGraph 运行不写 manifest.json，必须把 flow_state.json 单独并进历史列表。
@@ -631,6 +710,8 @@ class Workbench:
                           if p.is_dir() and not p.name.startswith(("_", "."))]
             for base in candidates:
                 if base.name in seen:
+                    continue
+                if self.run_dir(base.name) is None:
                     continue
                 if not ((base / "flow_state.json").exists()
                         or (base / "_logs" / "flow-error.log").exists()):
@@ -661,6 +742,9 @@ class Workbench:
                     "can_resume": status == "failed" and bool(state.get("next")),
                     "failed_step": state.get("failed_step") or "",
                     "error": state.get("error") or state.get("failure") or "",
+                    "directory": str(base),
+                    "running": self.active_run == base.name or not getattr(
+                        self.sessions.get(base.name), "finished", True),
                 })
 
         out.sort(key=lambda row: str(row.get("created") or row.get("run_id") or ""),
@@ -709,12 +793,20 @@ def option_matrix(config: Config) -> dict[str, dict[str, dict[str, Any]]]:
             "detail": status.detail,
         }
     out = {step: by_kind.get(kind, {}) for step, kind in OPTION_KIND.items()}
+    for name, entry in (out.get("voice") or {}).items():
+        try:
+            entry.update(P.voice_requirements(config,name))
+        except (ValueError,KeyError):
+            entry["available"] = False
+            entry["detail"] = "模型配置无效，请重新配置此模型"
 
     platform = config.platform
     want_w = int(platform.get("width", 1080))
     want_h = int(platform.get("height", 1920))
     want_fps = int(platform.get("fps", 30))
     for name, entry in (out.get("avatar") or {}).items():
+        entry["uses_scene_photo"] = P.avatar_uses_scene_photo(config, name)
+        entry["uses_source_video"] = P.avatar_uses_source_video(config, name)
         try:
             spec = P.avatar_output_spec(config, name, want_w, want_h, want_fps)
             _, _, notes = CAP.negotiate_canvas(want_w, want_h, spec)
@@ -865,7 +957,7 @@ def build_flow_result(run_id: str, run_dir: str | Path, state: dict[str, Any],
         raw = str(entry.get("status") or "ok")
         steps.append({
             "name": entry.get("node"),
-            "status": "failed" if raw == "failed" else "ok",
+            "status": raw if raw in {"failed", "skipped"} else "ok",
             "duration_s": entry.get("duration_s"),
         })
 
@@ -888,7 +980,9 @@ def build_flow_result(run_id: str, run_dir: str | Path, state: dict[str, Any],
             "note": voice.get("note") or profile.get("note") or "",
         },
         "avatar": {"id": avatar.get("avatar_id"),
-                   "used_portrait": bool(avatar.get("used_portrait"))},
+                   "used_portrait": bool(avatar.get("used_portrait")),
+                   "uses_scene_photo": bool(avatar.get("uses_scene_photo")),
+                   "uses_source_video": bool(avatar.get("uses_source_video"))},
         "has_package": False,
         "has_partial": bool(fragments),
         "partial_count": len(fragments),
@@ -990,6 +1084,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._asset_file("avatar_photo")
             if path == "/api/scene":
                 return self._scene_file()
+            if path == "/api/scenes":
+                return self._list_scenes()
+            if path == "/api/source-videos":
+                return self._list_source_videos()
+            if path == "/api/source-video":
+                return self._source_video_file()
             if path == "/api/voice/preview":
                 return self._voice_preview_file()
             if path == "/media":
@@ -1022,6 +1122,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._continue_flow()
             if path == "/api/scene":
                 return self._upload_scene()
+            if path == "/api/scene/select":
+                return self._select_scene()
+            if path == "/api/source-video":
+                return self._upload_source_video()
+            if path == "/api/source-video/select":
+                return self._select_source_video()
             if path == "/api/voice/preview":
                 return self._voice_preview()
             if path == "/api/settings/providers":
@@ -1034,6 +1140,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._create_voice()
             if path == "/api/assets/voice/audio":
                 return self._upload_voice_audio()
+            if path == "/api/assets/voice/reference-text":
+                return self._save_voice_reference_text()
+            if path == "/api/assets/voice/reference-url":
+                return self._save_voice_reference_url()
             if path == "/api/assets/avatar":
                 return self._create_avatar()
             if path == "/api/assets/avatar/photo":
@@ -1054,6 +1164,18 @@ class Handler(BaseHTTPRequestHandler):
         query = self._query()
         store = AssetStore(self.app.config)
         try:
+            if path == "/api/runs":
+                payload = self._read_json()
+                delete_files = payload.get("delete_files", False)
+                if not isinstance(delete_files, bool):
+                    return self._error("delete_files 必须为布尔值。", 400)
+                try:
+                    result = self.app.delete_run(str(payload.get("run_id") or ""), delete_files)
+                except FileNotFoundError as exc:
+                    return self._error(str(exc), 404)
+                except RuntimeError as exc:
+                    return self._error(str(exc), 409)
+                return self._json(result)
             if path == "/api/assets/voice":
                 store.delete_voice(query.get("voice_id", ""))
                 return self._json({"ok": True, "summary": store.summary()})
@@ -1096,6 +1218,31 @@ class Handler(BaseHTTPRequestHandler):
         """只出计划，不执行、不落盘。"""
         payload = self._read_json()
         cfg = self.app.config.with_overrides(payload.get("overrides") or {})
+        if payload.get("mode") == "flow":
+            # Use the same preflight and eight-node contract as the actual graph,
+            # rather than the legacy runner's asset requirements/publish node.
+            temp_base = cfg.root / ".tmp"
+            temp_base.mkdir(exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix="flow-plan-", dir=temp_base) as run_dir:
+                checked = VideoFlow(cfg, log=lambda line: None).node_preflight({
+                    "topic": str(payload.get("topic") or ""),
+                    "script_text": str(payload.get("script_text") or ""),
+                    "voice_id": str(cfg.get("project.voice_id", "") or ""),
+                    "avatar_id": str(cfg.get("project.avatar_id", "") or ""),
+                    "scene_photo": str(payload.get("scene_photo") or ""),
+                    "source_video": self._source_video_input(payload.get("source_video")),
+                    "run_dir": run_dir,
+                })
+            return self._json({
+                "steps": [{"name": name, "title": NODE_TITLES.get(name, name),
+                           "index": index,
+                           "disabled": name == "subtitles" and not cfg.step_enabled("subtitles"),
+                           "action": "skip" if name == "subtitles" and not cfg.step_enabled("subtitles") else "run",
+                           "reason": "已关闭字幕" if name == "subtitles" and not cfg.step_enabled("subtitles") else "新建工作流"}
+                          for index, name in enumerate(FLOW_NODES, 1)],
+                "problems": checked.get("errors") or [],
+                "warnings": checked.get("warnings") or [],
+            })
         probe = RunContext.create(cfg, slug="plan", persist=False)
         inputs = probe.manifest.setdefault("inputs", {})
         if (payload.get("topic") or "").strip():
@@ -1112,7 +1259,7 @@ class Handler(BaseHTTPRequestHandler):
                 {"name": s.name, "title": s.title, "index": i,
                  "action": "run" if s.name in plan.to_run else "skip",
                  "reason": plan.reasons[s.name]}
-                for i, s in enumerate(STEPS, start=1)
+                for i, s in enumerate((step for step in STEPS if cfg.step_enabled(step.name)), start=1)
             ]
         })
 
@@ -1127,6 +1274,7 @@ class Handler(BaseHTTPRequestHandler):
                 overrides=payload.get("overrides") or {},
                 gates=gates,
                 scene_photo=str(payload.get("scene_photo") or ""),
+                source_video=self._source_video_input(payload.get("source_video")),
             )
         except RuntimeError as exc:
             return self._error(str(exc), 409)
@@ -1258,6 +1406,83 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             session.unsubscribe(box)
 
+    # -------------------------------------------------------- 人物视频底片（独立于原有照片库）
+    def _source_videos_dir(self) -> Path:
+        directory = (self.app.config.path(self.app.config.get("project.assets_dir", "assets")) / "source_videos").resolve()
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
+    def _source_video_path(self, name: str) -> Path:
+        base = self._source_videos_dir()
+        path = base / name
+        if (not name or any(c in name for c in ("/", "\\", ":"))
+                or path.suffix.lower() not in {".mp4", ".avi", ".mov"}
+                or path.is_symlink() or path.resolve().parent != base or not path.is_file()):
+            raise AutoVidError("底片不存在或不属于已保存的视频素材")
+        return path
+
+    def _source_video_input(self, value: Any) -> str:
+        if not value:
+            return ""
+        path = Path(str(value))
+        allowed = self._source_video_path(path.name)
+        if path.resolve() != allowed.resolve():
+            raise AutoVidError("请从人物视频素材库选择底片，不接受任意本地路径")
+        return str(allowed)
+
+    def _source_video_data(self, path: Path) -> dict[str, Any]:
+        from ..videoretalk import validate_source
+        info = validate_source(path)
+        return {"name": path.name, "path": str(path.resolve()),
+                "url": f"/api/source-video?name={quote(path.name)}",
+                "width": info["width"], "height": info["height"],
+                "duration": info["duration"], "fps": info["fps"]}
+
+    def _list_source_videos(self) -> None:
+        base = self._source_videos_dir()
+        videos = [{"name": path.name, "url": f"/api/source-video?name={quote(path.name)}"}
+                  for path in sorted(base.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+                  if path.is_file() and not path.is_symlink() and path.resolve().parent == base
+                  and path.suffix.lower() in {".mp4", ".avi", ".mov"}]
+        return self._json({"videos": videos})
+
+    def _upload_source_video(self) -> None:
+        from uuid import uuid4
+        length = int(self.headers.get("Content-Length") or 0)
+        if not 0 < length <= 300 * 1024 * 1024:
+            self.close_connection = True
+            return self._error("底片不能为空，且不能超过 300MB", 400)
+        raw_name = Path(self._query().get("filename") or "人物底片.mp4").name
+        suffix = Path(raw_name).suffix.lower()
+        if suffix not in {".mp4", ".avi", ".mov"}:
+            self.close_connection = True
+            return self._error("支持 MP4、MOV、AVI 人物视频", 400)
+        label = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", Path(raw_name).stem).strip()[:60] or "人物底片"
+        target = self._source_videos_dir() / f"{uuid4().hex[:8]}-{label}{suffix}"
+        target.write_bytes(self._read_body())
+        try:
+            if target.stat().st_size != length:
+                raise AutoVidError("底片上传不完整，请重新上传")
+            data = self._source_video_data(target)
+        except AutoVidError as exc:
+            target.unlink(missing_ok=True)
+            return self._error(str(exc), 400)
+        return self._json(data)
+
+    def _select_source_video(self) -> None:
+        try:
+            path = self._source_video_path(str(self._read_json().get("name") or ""))
+            return self._json(self._source_video_data(path))
+        except AutoVidError as exc:
+            return self._error(str(exc), 400)
+
+    def _source_video_file(self) -> None:
+        try:
+            path = self._source_video_path(self._query().get("name") or "")
+        except AutoVidError as exc:
+            return self._error(str(exc), 404)
+        return self._send_file(path)
+
     # -------------------------------------------------------- 场景照片
     def _scenes_dir(self) -> Path:
         target = self.app.config.path(
@@ -1311,6 +1536,55 @@ class Handler(BaseHTTPRequestHandler):
         if not str(target).startswith(str(self._scenes_dir().resolve())) or not target.is_file():
             return self._error("文件不存在", 404)
         self._send_file(target)
+
+    def _list_scenes(self) -> None:
+        """Offer existing scene uploads and avatar photos without disclosing arbitrary paths."""
+        photos: list[dict[str, Any]] = []
+        base = self._scenes_dir().resolve()
+        for path in sorted(base.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+            if (not path.is_file() or path.is_symlink() or path.resolve().parent != base
+                    or path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}):
+                continue
+            photos.append({"name": path.name, "group": "已上传的场景照片",
+                           "url": f"/api/scene?name={quote(path.name)}",
+                           "selection": {"name": path.name}})
+        store = AssetStore(self.app.config)
+        for asset in store.list_avatars():
+            for filename in asset.photos:
+                path = store.avatar_photo_path(asset.id, filename)
+                if path is None or not path.is_file():
+                    continue
+                photos.append({"name": filename, "group": asset.name,
+                               "url": f"/api/assets/avatar/photo?avatar_id={quote(asset.id)}&filename={quote(filename)}",
+                               "selection": {"avatar_id": asset.id, "filename": filename}})
+        return self._json({"photos": photos})
+
+    def _select_scene(self) -> None:
+        """Resolve a saved photo by its scoped ID/name, never by a client-provided path."""
+        payload = self._read_json()
+        avatar_id = str(payload.get("avatar_id") or "")
+        if avatar_id:
+            filename = str(payload.get("filename") or "")
+            store = AssetStore(self.app.config)
+            path = store.avatar_photo_path(avatar_id, filename)
+            allowed = store.avatar_dir(avatar_id).resolve() / "photos"
+            url = f"/api/assets/avatar/photo?avatar_id={quote(avatar_id)}&filename={quote(filename)}"
+        else:
+            filename = str(payload.get("name") or "")
+            allowed = self._scenes_dir().resolve()
+            path = allowed / filename
+            url = f"/api/scene?name={quote(filename)}"
+        if (not filename or any(c in filename for c in ("/", "\\", ":"))
+                or Path(filename).suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+                or path is None or not path.is_file() or path.is_symlink()
+                or path.resolve().parent != allowed.resolve()):
+            return self._error("照片不存在或不属于可选素材", 400)
+        info = M.probe_media(path)
+        width, height = int(info.get("width") or 0), int(info.get("height") or 0)
+        if not info.get("has_video") or min(width, height) < 256:
+            return self._error("照片无效或分辨率太低，请重新上传清晰照片", 400)
+        return self._json({"name": filename, "path": str(path.resolve()), "url": url,
+                           "width": width, "height": height, "avatar_id": avatar_id})
 
     # -------------------------------------------------------- 文件服务
     def _resolve_media(self) -> tuple[Path, Path] | None:
@@ -1434,10 +1708,11 @@ class Handler(BaseHTTPRequestHandler):
     def _create_voice(self) -> None:
         payload = self._read_json()
         name = str(payload.get("name") or "").strip()
-        if not name:
-            return self._error("请先给这个音色起个名字", 400)
         store = AssetStore(self.app.config)
-        asset = store.create_voice(name, language=str(payload.get("language") or "zh-CN"))
+        try:
+            asset = store.create_voice(name, language=str(payload.get("language") or "zh-CN"))
+        except AutoVidError as exc:
+            return self._error(str(exc), 400)
         return self._json({"voice": asset.to_dict(), "summary": store.summary()})
 
     def _upload_voice_audio(self) -> None:
@@ -1452,6 +1727,26 @@ class Handler(BaseHTTPRequestHandler):
                 query.get("filename") or "recording.wav",
                 ref_text=query.get("ref_text", ""),
             )
+        except AutoVidError as exc:
+            return self._error(str(exc), 400)
+        return self._json({"voice": asset.to_dict(), "summary": store.summary()})
+
+    def _save_voice_reference_text(self) -> None:
+        payload = self._read_json()
+        store = AssetStore(self.app.config)
+        try:
+            asset = store.set_voice_reference_text(str(payload.get("voice_id") or ""),
+                                                   str(payload.get("ref_text") or ""))
+        except AutoVidError as exc:
+            return self._error(str(exc), 400)
+        return self._json({"voice": asset.to_dict(), "summary": store.summary()})
+
+    def _save_voice_reference_url(self) -> None:
+        payload = self._read_json()
+        store = AssetStore(self.app.config)
+        try:
+            asset = store.set_voice_reference_url(str(payload.get("voice_id") or ""),
+                                                  str(payload.get("url") or ""))
         except AutoVidError as exc:
             return self._error(str(exc), 400)
         return self._json({"voice": asset.to_dict(), "summary": store.summary()})
@@ -1574,6 +1869,10 @@ class Handler(BaseHTTPRequestHandler):
         asset = store.get_voice(voice_id) if voice_id else None
         if asset is None:
             return self._error("没有选音色。先在「音色库」录一段，再回来试音。", 400)
+        problems = P.voice_setup_problems(self.app.config,provider,asset)
+        if problems:
+            return self._json({"ok":False,"provider":provider,"error":problems[0],
+                               "action":"configure_voice","voice_id":asset.id})
 
         cfg = self.app.config.with_overrides({
             "steps.voice.provider": provider,

@@ -239,6 +239,7 @@ def cmd_graph(args: argparse.Namespace, config: Config) -> int:
             "voice_id": str(config.get("project.voice_id", "") or ""),
             "avatar_id": str(config.get("project.avatar_id", "") or ""),
             "scene_photo": str(Path(args.scene_photo).resolve()) if args.scene_photo else "",
+            "source_video": str(Path(args.source_video).resolve()) if args.source_video else "",
             "revision": 0,
             "approvals": {},
             "trace": [],
@@ -378,6 +379,7 @@ def build_parser() -> argparse.ArgumentParser:
     g_run.add_argument("--voice-id", help="音色资产 ID")
     g_run.add_argument("--avatar-id", help="形象资产 ID")
     g_run.add_argument("--scene-photo", help="本次拍摄场景照；自然动作模式建议腰部以上、双手入镜")
+    g_run.add_argument("--source-video", help="视频口型替换的人物底片，仅视频输入引擎使用；保留照片模式")
     g_run.add_argument("--thread", help="自定义线程 ID")
     g_run.add_argument("--gates", help="启用人审闸门，如 script,voice（默认关闭）")
     g_run.add_argument("--auto", action="store_true", help="显式关闭全部闸门")

@@ -27,9 +27,11 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import re
 import shutil
+import urllib.parse
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -111,6 +113,8 @@ class VoiceAsset:
     # 云端克隆出来的音色 ID，按 provider 名字缓存。
     # 关键：注册一次就够，绝不能每次生成视频都重新克隆一遍（既慢又费钱）。
     cloud_voice_ids: dict[str, str] = field(default_factory=dict)
+    cloud_voice_fingerprints: dict[str, str] = field(default_factory=dict)
+    cloud_reference_url: str = ""       # Private local metadata; may contain an expiring OSS signature.
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -162,6 +166,16 @@ def _safe_name(name: str, fallback: str) -> str:
     return cleaned[:60] or fallback
 
 
+def validate_voice_name(name: str) -> str:
+    """Display names are Chinese; provider enrollment names are independent."""
+    name = name.strip()
+    if not name:
+        raise AutoVidError("请先给这个音色起个中文名字")
+    if not re.fullmatch(r"[\u3007\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0002fa1f\U00030000-\U0003347f]+", name):
+        raise AutoVidError("音色名称只能使用中文汉字，不能包含英文、数字、空格或符号")
+    return name
+
+
 class AssetStore:
     def __init__(self, config: Any):
         self.config = config
@@ -197,12 +211,13 @@ class AssetStore:
         return self._load_one(self.voice_dir(voice_id) / "meta.json", VoiceAsset)
 
     def create_voice(self, name: str, language: str = "zh-CN") -> VoiceAsset:
+        name = validate_voice_name(name)
         voice_id = _new_id("voice", name)
         target = self.voice_dir(voice_id)
         target.mkdir(parents=True, exist_ok=True)
         (target / "model").mkdir(exist_ok=True)
         asset = VoiceAsset(
-            id=voice_id, name=name.strip() or "未命名音色", created=_now(),
+            id=voice_id, name=name, created=_now(),
             language=language, prompt_text=enrollment_script(),
         )
         self._save(target / "meta.json", asset.to_dict())
@@ -241,17 +256,24 @@ class AssetStore:
 
             # 统一格式：克隆服务普遍要求干净的 wav，提前规范化能省掉一堆兼容问题
             ref = target / "ref.wav"
+            staged = target / "_normalized_ref.wav"
             M.run_ffmpeg(
                 ["-i", str(incoming), "-ac", "1", "-ar", "24000",
-                 "-c:a", "pcm_s16le", str(ref)],
+                 "-vn", "-c:a", "pcm_s16le", str(staged)],
                 desc="规范化参考音频",
             )
+            staged.replace(ref)
         finally:
             incoming.unlink(missing_ok=True)
+            (target / "_normalized_ref.wav").unlink(missing_ok=True)
 
         asset.ref_audio = "ref.wav"
         asset.duration_s = round(duration, 2)
-        asset.ref_text = (ref_text or "").strip() or enrollment_script()
+        # Uploaded audio is not necessarily the enrollment script. Never invent its transcript.
+        asset.ref_text = (ref_text or "").strip()
+        asset.cloud_voice_ids = {}
+        asset.cloud_voice_fingerprints = {}
+        asset.cloud_reference_url = ""  # A URL for the previous recording must never follow a new upload.
         asset.status = VOICE_STATUS_READY
         asset.note = (
             "样本偏短，克隆稳定性一般" if duration < VOICE_GOOD_SECONDS
@@ -266,13 +288,17 @@ class AssetStore:
             raise AutoVidError(f"找不到音色 {voice_id}")
         shutil.rmtree(target)
 
-    def set_cloud_voice_id(self, voice_id: str, provider: str, cloud_id: str) -> VoiceAsset:
+    def set_cloud_voice_id(self, voice_id: str, provider: str, cloud_id: str,
+                           fingerprint: str = "") -> VoiceAsset:
         """记住某个云端 provider 为这个音色分配的音色 ID，避免重复克隆。"""
         asset = self.get_voice(voice_id)
         if asset is None:
             raise AutoVidError(f"找不到音色 {voice_id}")
         asset.cloud_voice_ids = dict(asset.cloud_voice_ids or {})
         asset.cloud_voice_ids[provider] = cloud_id
+        asset.cloud_voice_fingerprints = dict(asset.cloud_voice_fingerprints or {})
+        if fingerprint:
+            asset.cloud_voice_fingerprints[provider] = fingerprint
         self._save(self.voice_dir(voice_id) / "meta.json", asset.to_dict())
         return asset
 
@@ -282,7 +308,56 @@ class AssetStore:
         if asset is None:
             raise AutoVidError(f"找不到音色 {voice_id}")
         asset.cloud_voice_ids = {}
+        asset.cloud_voice_fingerprints = {}
         self._save(self.voice_dir(voice_id) / "meta.json", asset.to_dict())
+        return asset
+
+    def set_voice_reference_text(self, voice_id: str, text: str) -> VoiceAsset:
+        asset = self.get_voice(voice_id)
+        if asset is None:
+            raise AutoVidError(f"找不到音色 {voice_id}")
+        if asset.ref_text != text.strip():
+            asset.ref_text = text.strip()
+            asset.cloud_voice_ids = {}
+            asset.cloud_voice_fingerprints = {}
+            self._save(self.voice_dir(voice_id) / "meta.json", asset.to_dict())
+        return asset
+
+    def set_voice_reference_url(self, voice_id: str, url: str) -> VoiceAsset:
+        """Associate a user-provided, cloud-readable URL with this recording.
+
+        We never fetch arbitrary URLs on the local server. Keep signed links in
+        ignored asset metadata, not in provider configs or logs.
+        """
+        asset = self.get_voice(voice_id)
+        if asset is None:
+            raise AutoVidError(f"找不到音色 {voice_id}")
+        value = url.strip()
+        if value:
+            try:
+                parsed = urllib.parse.urlsplit(value)
+                host = parsed.hostname or ""
+                if parsed.scheme != "https" or not host or parsed.username or parsed.password or parsed.fragment:
+                    raise ValueError
+                if host.lower() == "localhost" or host.lower().endswith((".localhost", ".local")) or "." not in host:
+                    raise ValueError
+                try:
+                    address = ipaddress.ip_address(host)
+                except ValueError:
+                    address = None
+                if address is not None and not address.is_global:
+                    raise ValueError
+                _ = parsed.port  # Validate malformed ports as well.
+            except ValueError as exc:
+                raise AutoVidError("请填写公网可访问的 HTTPS 音频链接，不能使用本机地址、私有 IP 或 oss:// 地址") from exc
+        if asset.cloud_reference_url != value:
+            asset.cloud_reference_url = value
+            if not asset.ref_audio:
+                asset.status = VOICE_STATUS_READY if value else VOICE_STATUS_EMPTY
+                asset.note = "参考录音链接已保存，内容与可访问性待云端验证" if value else "请提供录音或录音链接"
+            # URL models include this value in the fingerprint. Local enrollment
+            # does not depend on it, so its cached voice remains valid.
+            self._save(self.voice_dir(voice_id) / "meta.json", asset.to_dict())
         return asset
 
     def voice_reference(self, voice_id: str) -> Path | None:

@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AutoVid 短视频口播工作台</title>
+<script>
+try { document.documentElement.dataset.theme = localStorage.getItem('autovid.theme') === 'dark' ? 'dark' : 'light'; }
+catch (_) { document.documentElement.dataset.theme = 'light'; }
+</script>
 <style>
   :root{
     --bg:#0d0f16; --panel:#151926; --panel2:#1b2030; --line:#262c40;
@@ -98,7 +102,16 @@
   .runitem .rid{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
   .runitem .st{font-size:11px;color:var(--dim);flex:none}
   .runitem .runops{display:flex;gap:5px;flex:none}
-  .runitem .runops button{padding:3px 7px;font-size:11px}
+  .runitem .runops button{padding:3px 7px;font-size:11px;width:auto;flex:none;white-space:nowrap}
+  .danger{background:var(--panel2);color:var(--err);border:1px solid var(--err)}
+  .delete-dialog{width:min(460px,calc(100vw - 32px));padding:20px;background:var(--panel);
+    color:var(--text);border:1px solid var(--line);border-radius:12px}
+  .delete-dialog::backdrop{background:#0009}
+  .delete-dialog h2{font-size:16px;margin:0 0 12px}
+  .delete-dialog p{line-height:1.7;overflow-wrap:anywhere}
+  .checkline{display:flex;align-items:center;gap:8px;color:var(--text);font-size:13px}
+  .delete-dialog .actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
+  .delete-dialog .actions button{width:auto}
   .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);
     background:var(--accent);color:#fff;padding:9px 18px;border-radius:20px;
     font-size:13px;opacity:0;transition:.25s;pointer-events:none;z-index:99;max-width:80vw;text-align:center}
@@ -219,108 +232,91 @@
     .provider-item{align-items:flex-start}
   }
 </style>
+<link rel="stylesheet" href="/static/workbench.css">
 </head>
 <body>
 
-<header>
-  <h1>Auto<span>Vid</span> 短视频口播工作台</h1>
-  <span class="ver" id="ver"></span>
-  <div class="pills" id="pills"></div>
-</header>
-
-<main>
-  <!-- 左栏 -->
-  <div class="stack">
-    <div class="tabs">
-      <button class="tab active" data-tab="create">创作</button>
-      <button class="tab" data-tab="voices">音色库</button>
-      <button class="tab" data-tab="avatars">形象库</button>
-      <button class="tab" data-tab="settings">设置</button>
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="brand-row"><div class="brand">Auto<span>Vid</span></div>
+      <button class="theme-toggle" id="themeToggle" type="button" aria-label="切换到暗色主题" title="切换到暗色主题" aria-pressed="false">
+        <!-- Iconify lucide/moon and lucide/sun, ISC license; embedded for offline use. -->
+        <svg class="moon-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401"/></svg>
+        <svg class="sun-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32l1.41 1.41M2 12h2m16 0h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></g></svg>
+      </button>
     </div>
+    <div class="brand-note">口播视频工作台</div>
+    <nav class="tabs" aria-label="主导航">
+      <button class="tab active" data-tab="create"><span>01</span>创作视频</button>
+      <button class="tab" data-tab="history"><span>02</span>历史作品</button>
+      <div class="nav-group">素材与服务</div>
+      <button class="tab" data-tab="voices"><span>03</span>音色库</button>
+      <button class="tab" data-tab="avatars"><span>04</span><b id="materialNavLabel" style="font-weight:inherit">视频底片</b></button>
+      <button class="tab" data-tab="settings"><span>05</span>服务设置</button>
+    </nav>
+    <div class="sidebar-bottom"><div id="pills" class="pills"></div><p id="activeTaskHint" role="status" aria-live="polite"></p><p>本地工作台 <span class="ver" id="ver"></span></p></div>
+  </aside>
+<main id="workbench">
+  <div class="page-top"><div><div class="eyebrow" id="breadcrumb">工作台 / 创作</div><h1 id="pageTitle">开始一条新的口播视频</h1><p id="pageSubtitle">准备文案、出镜素材和声音，剩下的交给工作流。</p></div><button class="ghost" id="clearDraft">清空草稿</button></div>
+  <div class="workflow" id="workflow"><div class="workflow-item active"><span>1</span>准备内容</div><div class="workflow-item"><span>2</span>生成视频</div><div class="workflow-item"><span>3</span>预览与下载</div></div>
+  <div class="workspace" id="workspace">
+  <div class="stack" id="formWorkspace">
 
     <!-- 创作 -->
-    <div class="card panel" id="panel-create">
-      <h2>创作参数</h2>
-
-      <div class="hint" id="modeHint"></div>
-
-      <div id="flowOpts" class="hidden">
-        <label>人物场景照</label>
-        <input type="file" id="sceneFile" accept="image/*" capture="environment">
-        <div id="scenePreview" class="hint">
-          上传正面、腰部以上、双手入镜的竖版照片。
+    <div class="panel" id="panel-create">
+      <section class="card"><div class="section-heading"><span class="step-no">01</span><h2>这次想讲什么</h2></div>
+        <div class="source-tabs"><button class="active" data-script-source="script">我有文案</button><button data-script-source="topic">帮我写文案</button></div>
+        <div id="scriptField"><label class="sr-only" for="script">口播文案</label><textarea id="script" placeholder="粘贴你的口播稿，例如介绍一个项目、讲解一个知识点。"></textarea><div class="word-summary" id="wordSummary">0 字 · 填好文案后会估算时长</div></div>
+        <div id="topicField" class="hidden"><label for="topic">视频主题</label><input type="text" id="topic" placeholder="例如，介绍我的口播视频工作流"><div id="row_script"><label for="p_script">文案生成方式</label><select id="p_script"></select></div><p class="hint">按已配置方式生成；内置模板不等于大模型创作。</p></div>
+      </section>
+      <section class="card" id="flowOpts"><div class="section-heading"><span class="step-no">02</span><h2>谁来出镜</h2><span class="section-note" id="appearanceNote">人物、衣服和背景来自照片</span></div>
+        <div id="photoSourceBox">
+        <div class="scene-picker"><div id="scenePreview" class="scene-preview"><div class="photo-empty">人物照片</div></div><div class="scene-description"><b id="sceneName">选择本次视频使用的照片</b><p class="hint" id="sceneDetails">已经保存的照片可以反复使用，无需每次重拍。</p><div class="photo-actions"><button class="ghost tiny" id="chooseScene">从库中选择</button><button class="ghost tiny" id="uploadScene">上传新照片</button></div></div></div>
+        <input type="file" id="sceneFile" accept="image/jpeg,image/png,image/webp,image/bmp" class="hidden">
+        <p class="hint">建议正面清晰、上半身及双手入镜。上传的照片保存在本地，可在照片选择器中复用。</p>
         </div>
-
-        <label>人工审核闸门</label>
-        <div class="chips" id="gatePicker"></div>
-        <div class="hint">勾选后会暂停确认。</div>
-      </div>
-
-      <label>选题</label>
-      <input type="text" id="topic" placeholder="例：为什么你越努力越焦虑">
-
-      <label>自有文案（可选，留空则用 AI 生成）</label>
-      <textarea id="script" placeholder="粘贴你写好的口播稿，会自动切段。"></textarea>
-
-      <div id="row_script">
-        <label>文案来源</label>
-        <select id="p_script"></select>
-      </div>
-      <div id="providerWarn"></div>
-      <div class="hidden" style="margin:8px 0 2px" id="row_recommend">
-        <button class="ghost tiny" id="btnRecommended" style="width:100%">
-          使用推荐配置
-        </button>
-      </div>
-
-      <label>音色</label>
-      <select id="p_voice_asset"></select>
-      <div id="row_voice">
-        <label>语音引擎</label>
-        <select id="p_voice"></select>
-      </div>
-      <div style="margin:6px 0 2px">
-        <button class="ghost tiny" id="btnVoicePreview" style="width:100%">
-          试听当前音色
-        </button>
-      </div>
-      <div id="voicePreviewBox"></div>
-      <div class="hint" id="voiceHint"></div>
-
-      <label>形象</label>
-      <select id="p_avatar_asset"></select>
-      <div id="row_avatar">
-        <label>数字人引擎</label>
-        <select id="p_avatar"></select>
-      </div>
-      <div class="hint" id="avatarHint"></div>
-
-      <div id="visualsRow" class="hidden">
-        <label>背景图（已废弃）</label>
-        <select id="p_visuals"></select>
-      </div>
-
-      <div id="preflight"></div>
-
-      <div class="btns">
-        <button class="primary" id="btn-run">开始生成</button>
-        <button class="ghost" id="btn-plan">只看运行计划</button>
-      </div>
+        <div id="videoSourceBox" class="hidden">
+          <label for="sourceVideoSelect">已保存的人物视频底片</label>
+          <select id="sourceVideoSelect"><option value="">选择底片，或上传新视频</option></select>
+          <div class="photo-actions"><button class="ghost tiny" id="uploadSourceVideo">上传新底片</button><button class="text-button" onclick="jumpTo('avatars')">管理出镜素材</button></div>
+          <input type="file" id="sourceVideoFile" accept="video/mp4,video/quicktime,video/x-msvideo,.mp4,.mov,.avi" class="hidden">
+          <video id="sourceVideoPreview" controls playsinline preload="metadata" class="hidden" style="width:100%;max-height:320px;margin-top:12px"></video>
+          <p class="hint" id="sourceVideoStatus" role="status">先准备清晰正面的上半身视频，底片必须不短于配音。</p>
+          <p class="hint">保留底片中的衣服、背景和身体动作，只替换口型。不换装、不换脸、不倒放循环。建议竖屏 1080P、30 帧，录制 60 至 90 秒。</p>
+        </div>
+        <div id="identityRow"><label for="p_avatar_asset">身份参考形象</label><select id="p_avatar_asset"></select><div class="hint" id="identityHint">仅用于需要独立身份参考的引擎。</div></div>
+      </section>
+      <section class="card"><div class="section-heading"><span class="step-no">03</span><h2>选择声音与生成服务</h2><button class="text-button" onclick="jumpTo('settings')">管理服务</button></div>
+        <div class="field-grid"><div><label for="p_voice_asset">朗读音色</label><select id="p_voice_asset"></select></div><div id="row_avatar"><label for="p_avatar">视频生成服务</label><select id="p_avatar"></select></div></div>
+        <div id="row_voice"><label for="p_voice">语音服务</label><select id="p_voice"></select></div>
+        <div class="voice-summary"><div class="hint" id="voiceHint"></div><button class="text-button" id="btnVoicePreview">试听音色</button></div><div id="voicePreviewBox"></div><div class="hint" id="avatarHint"></div>
+        <label class="checkline" for="addSubtitles"><input type="checkbox" id="addSubtitles" checked>添加字幕</label>
+        <p class="hint">取消勾选后，不添加正文字幕和顶部关键词；单独生成的封面不受影响。素材本身已有的文字不会被去除。</p>
+        <label for="exportMode">最终视频导出规格</label>
+        <select id="exportMode"><option value="source">跟随视频底片（推荐，不主动放大）</option><option value="portrait1080">竖屏 1080 × 1920，30 帧</option><option value="portrait720">竖屏 720 × 1280，30 帧</option></select>
+        <p class="hint" id="outputSpecs" style="white-space:pre-line"></p>
+        <details class="advanced"><summary>人工确认（可选）</summary><div class="chips" id="gatePicker"></div><p class="hint">选中后会暂停流程，等你确认再继续。</p></details>
+      </section>
+      <div class="hidden" id="modeHint"></div><div class="hidden" id="providerWarn"></div><div class="hidden" id="row_recommend"><button id="btnRecommended">使用推荐配置</button></div><div id="visualsRow" class="hidden"><select id="p_visuals" aria-label="旧版背景引擎"></select></div>
+      <div id="preflight"></div><div class="action-bar"><div><p id="readyText" class="hint">正在检查素材与配置…</p><button class="text-button" id="btn-plan">查看运行计划</button></div><button class="primary" id="btn-run">开始生成</button></div>
     </div>
 
     <!-- 音色库 -->
     <div class="card panel hidden" id="panel-voices">
       <h2>音色库</h2>
+      <p class="library-intro">声音只需准备一次，之后每条视频都可以直接选择。点击已有音色可试听或管理参考音频。</p>
       <div id="voiceList"><div class="empty">还没有音色</div></div>
 
       <div style="display:flex;gap:8px;margin-top:10px">
-        <input type="text" id="newVoiceName" placeholder="音色名字，如：我本人">
+        <input type="text" id="newVoiceName" placeholder="中文名称，如：讲解声音" aria-describedby="voiceNameHint">
         <button class="ghost tiny" id="btnNewVoice" style="flex:none">新建</button>
       </div>
 
+      <div class="hint" id="voiceNameHint">名称只能使用中文汉字，不能包含英文、数字、空格或符号。已有音色保留原名。</div>
+
       <div id="voiceEnroll" class="enroll hidden">
         <div style="font-size:12.5px;font-weight:600" id="voiceEnrollName"></div>
-        <label>请按下面的文字朗读（约 40~60 秒）</label>
+        <label>参考朗读模板（仅用于录音，上传音频不必照读）</label>
         <div class="promptbox" id="voicePrompt"></div>
         <div class="hint" id="voiceTips"></div>
 
@@ -334,6 +330,18 @@
         <label>或者上传已录好的音频</label>
         <input type="file" id="voiceFile" accept="audio/*">
         <div class="hint" id="voiceUploadStatus"></div>
+        <label for="voiceReferenceText">样本中实际说的文字</label>
+        <textarea id="voiceReferenceText" placeholder="需要参考文字的服务，必须填写与录音完全一致的内容。阿里云 Qwen3 声音复刻无需填写，不要猜写。" style="min-height:90px"></textarea>
+        <button class="ghost tiny" id="saveVoiceReferenceText">保存参考文字</button>
+        <p class="hint">换录音或修改参考文字后，旧音色缓存会失效，下次试听重新注册。云端音色与模型、账号绑定，不会混用。</p>
+        <section class="reference-link-box">
+          <h3>参考录音链接（需要链接的模型使用）</h3>
+          <label for="voiceReferenceUrl">同一份录音的 HTTPS 链接</label>
+          <input type="url" id="voiceReferenceUrl" placeholder="https://你的存储空间/参考录音.wav">
+          <p class="hint">直接粘贴你本人录音文件的 HTTPS 链接即可，不需要配置 OSS，也不必先上传本地录音。链接应能直接读取音频，不能是网盘分享页、普通网页或视频链接。保存只记录地址，点击试听时才提交云端；换本地录音后需重新填写对应链接。</p>
+          <button class="ghost tiny" id="saveVoiceReferenceUrl">保存录音链接</button>
+          <div class="hint" id="referenceLinkStatus" role="status"></div>
+        </section>
 
         <div id="voicePlayback" class="hidden" style="margin-top:10px">
           <label>已保存的参考音频（试听）</label>
@@ -344,7 +352,9 @@
 
     <!-- 形象库 -->
     <div class="card panel hidden" id="panel-avatars">
-      <h2>形象库</h2>
+      <h2 id="materialLibraryTitle">人物视频底片</h2>
+      <div id="photoLibrary" class="hidden">
+      <p class="library-intro">把常用出镜照片保存在这里，创作时可直接从库中选择。身份参考是否生效，取决于生成引擎。</p>
       <div id="avatarList"><div class="empty">还没有形象</div></div>
 
       <div style="display:flex;gap:8px;margin-top:10px">
@@ -359,10 +369,18 @@
         <div class="hint" id="avatarUploadStatus"></div>
         <div class="photogrid" id="avatarGrid"></div>
       </div>
+      </div>
+      <div class="advanced" id="videoLibrarySection">
+        <h3>人物视频底片</h3>
+        <p class="hint">先上传一段本人出镜的视频，之后可反复用于不同文案。人物、衣服、背景和身体动作来自底片；换衣服或背景时上传新底片。底片应不短于配音。</p>
+        <button class="ghost tiny" id="libraryUploadSourceVideo">上传人物视频</button>
+        <div class="hint" id="sourceVideoLibraryStatus" role="status"></div>
+        <div id="sourceVideoLibrary"><div class="empty">正在读取视频素材…</div></div>
+      </div>
     </div>
 
     <div class="card panel hidden" id="panel-settings">
-      <h2>提供商设置</h2>
+      <h2>连接生成服务</h2>
       <div class="hint settings-intro">按用途管理接口。这里只负责连接服务，生成参数仍在“创作”页选择。</div>
 
       <div class="provider-groups">
@@ -399,6 +417,7 @@
         </section>
       </div>
 
+      <section id="providerCatalog" class="provider-editor hidden"><div class="provider-editor-head"><h3 id="providerCatalogTitle">选择一个具体模型</h3><button class="ghost tiny" id="closeProviderCatalog">关闭</button></div><p class="hint">选择后程序固定匹配接口，只填写它需要的配置。各家供应商都保留。</p><div id="providerCatalogCards"></div></section>
       <div class="provider-editor hidden" id="providerEditor">
         <div class="provider-editor-head">
           <div>
@@ -409,8 +428,9 @@
         </div>
 
         <input type="hidden" id="sp_kind" value="voice">
-        <label for="sp_preset">接口模板</label>
+        <div id="spPresetRow"><label for="sp_preset">接口模板</label>
         <select id="sp_preset"></select>
+        </div><p id="spSelectedModel" style="font-weight:600"></p>
         <div class="hint" id="sp_preset_hint"></div>
 
         <label for="sp_label">供应商名称</label>
@@ -430,6 +450,7 @@
             <div class="hint" id="sp_base_url_hint"></div>
             <label for="sp_model">模型 ID</label>
             <select id="sp_model"></select>
+            <div class="hint" id="sp_model_hint" role="status"></div>
             <input type="text" id="sp_model_custom" class="hidden" placeholder="填写自定义模型 ID">
           </div>
         </details>
@@ -440,23 +461,27 @@
         </div>
         <div class="hint" id="sp_status" role="status" aria-live="polite"></div>
       </div>
+      <details class="advanced"><summary>兼容功能显示</summary><label class="checkline"><input type="checkbox" id="showPhotoFeatures">显示照片生成与形象照片库</label><p class="hint">默认仅显示人物视频底片模式。打开可恢复照片服务和照片库；这里只改变显示，不删除素材、服务配置或历史记录。</p></details>
     </div>
 
-    <div class="card">
-      <h2>历史运行</h2>
+    <div class="card panel hidden" id="panel-history">
+      <h2>历史运行 <span class="ver" id="historyCount"></span></h2>
+      <p class="library-intro">查看成片、下载已完成片段，或从失败处继续。删除记录时可以选择是否同时删除本地文件。</p>
       <div id="runs"><div class="empty">加载中…</div></div>
     </div>
   </div>
 
   <!-- 右栏 -->
-  <div class="stack">
-    <div class="card">
+  <div class="stack output-workspace" id="outputWorkspace">
+    <div class="card" id="resultCard"><div class="preview-heading"><h2>视频预览</h2><span class="hint" id="previewFormat">9:16 竖屏</span></div><div id="result"><div class="video-placeholder"><div class="empty">生成后，视频会显示在这里<br><span class="hint">可以预览和下载，无需切换页面</span></div></div></div></div>
+    <div class="next-step" id="nextStep"><h3>下一步</h3><p id="nextAction">先填入口播稿，再选择一张出镜照片。</p><button class="text-button hidden" id="nextActionButton">去准备</button></div>
+    <div class="card hidden" id="progressCard">
       <h2>生成进度 <span id="runid" class="ver"></span></h2>
       <div class="nodes" id="nodes"></div>
       <div class="runstatus" id="runStatus" role="status" aria-live="polite">等待开始</div>
     </div>
 
-    <div class="card">
+    <div class="card hidden" id="logCard">
       <details class="logdetails" id="logDetails">
         <summary>详细日志（排错时查看）</summary>
         <div class="log" id="log"><span class="t">等待开始…</span></div>
@@ -482,20 +507,35 @@
       </div>
     </div>
 
-    <div class="card">
-      <h2>产出结果</h2>
-      <div id="result"><div class="empty">还没有结果。<br>点左边「开始生成」跑一条。</div></div>
-    </div>
+  </div>
   </div>
 </main>
+</div>
 
 <div class="toast" id="toast"></div>
 
+<dialog class="delete-dialog" id="deleteRunDialog" aria-labelledby="deleteRunTitle">
+  <h2 id="deleteRunTitle">删除历史运行</h2>
+  <p id="deleteRunName"></p>
+  <label class="checkline"><input type="checkbox" id="deleteRunFiles">同时删除本地文件</label>
+  <p class="hint" id="deleteRunHint"></p>
+  <p class="hint" id="deleteRunDirectory"></p>
+  <div class="hint" id="deleteRunError" role="alert"></div>
+  <div class="actions">
+    <button class="ghost" id="cancelDeleteRun">取消</button>
+    <button class="danger" id="confirmDeleteRun">删除记录</button>
+  </div>
+</dialog>
+
+<dialog class="scene-dialog" id="sceneDialog" aria-labelledby="sceneDialogTitle"><div class="dialog-heading"><h2 id="sceneDialogTitle">选择已保存的照片</h2><button class="ghost tiny" id="closeSceneDialog">关闭</button></div><p class="hint">同一张照片可以用于不同文案。选择照片不会改变库里的主图。</p><div id="sceneChoices" class="scene-choices"></div><div class="hint" id="sceneChoiceStatus" role="status"></div></dialog>
+<script src="/static/workbench.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 let STEPS = [], OPTIONS = {}, CURRENT = {}, ASSETS = {}, RUN_ID = null, source = null;
 // 只在“回看历史”时切换标签清空右栏；正在生成的任务不能因为看了设置就断开进度。
 let VIEWING_HISTORY = false;
+let RUN_BUSY = false, SCRIPT_SOURCE = 'script';
+let HISTORY_REQUEST = 0;
 let enrollVoiceId = null, enrollAvatarId = null;
 /* 流程模式相关 */
 let MODE = 'pipeline';
@@ -505,6 +545,10 @@ let PENDING_GATE = null;      // {run_id, gate, payload}
 let OPTION_INFO = {}, RECOMMENDED = {}, PROJECT = {}, PROVIDER_LABELS = {};
 /* 本次场景照片：{name, path, url, width, height} */
 let SCENE = null;
+let SOURCE_VIDEO = null;
+let WORKBENCH_PLATFORM = {};
+let SHOW_PHOTO_FEATURES = false;
+try { SHOW_PHOTO_FEATURES = localStorage.getItem('autovid.showPhotoFeatures') === 'true'; } catch (_) {}
 
 function activeNodes(){
   return MODE === 'flow' ? FLOW_NODES : STEPS;
@@ -534,6 +578,7 @@ function renderProviderSelects(){
     } else if (key === 'avatar'){
       const keep = names.filter(isMouthEngine);
       if (keep.length) names = keep;
+      if (!SHOW_PHOTO_FEATURES) names = names.filter(name => ((OPTION_INFO.avatar||{})[name]||{}).uses_source_video === true);
     }
     if (!names.length){
       select.innerHTML = '<option value="">请先到设置中配置</option>';
@@ -555,12 +600,17 @@ async function voicePreview(){
   const voiceId = $('p_voice_asset').value;
   const provider = $('p_voice').value;
   if (!voiceId){ box.innerHTML = '<div class="warnbanner" style="margin-top:8px">先去「音色库」录一段参考音频</div>'; return; }
+  const problems = voiceAssetProblems();
+  if (problems.length){ jumpTo('voices'); openVoiceEnroll(voiceId); toast(problems[0]); return; }
+  const requestedContext = voicePreviewContext();
+  box.dataset.context = requestedContext;
   $('btnVoicePreview').disabled = true;
-  box.innerHTML = '<div class="hint" style="margin-top:8px">正在合成试听…（本地引擎首次要准备音色，可能 30 秒左右）</div>';
+  box.innerHTML = `<div class="hint" style="margin-top:8px">正在用 ${esc(engineLabel(provider))} 合成试听，将使用该服务的计费规则。</div>`;
   try {
     const r = await fetch('/api/voice/preview', {method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({voice_id: voiceId, provider})}).then(x => x.json());
+    if (requestedContext !== voicePreviewContext()) return;
     if (r.error){ box.innerHTML = `<div class="failbox" style="margin-top:8px">${esc(r.error)}</div>`; return; }
     if (!r.ok){
       box.innerHTML = `<div class="failbox" style="margin-top:8px"><b>这个引擎没合成出声音</b><br>${esc(r.error||'')}</div>`;
@@ -602,6 +652,7 @@ function q(o){ return Object.entries(o).map(([k,v])=>`${k}=${encodeURIComponent(
 /* ================================================================ 标签页 */
 document.querySelectorAll('.tab').forEach(tab => {
   tab.onclick = () => {
+    HISTORY_REQUEST += 1;
     if (VIEWING_HISTORY) resetHistoryView();
     document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t === tab));
     // 面板名从 DOM 推导，不要硬编码列表 ——
@@ -609,6 +660,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     // 点设置会把三个面板全隐藏、设置面板自己又没显示，左栏直接空掉。
     document.querySelectorAll('.panel').forEach(p =>
       p.classList.toggle('hidden', p.id !== 'panel-' + tab.dataset.tab));
+    updateWorkbenchView(tab.dataset.tab);
     if (tab.dataset.tab === 'settings') loadSettings();
     // 设置页保存 Key 后，切回创作页必须重新读取当前 provider 状态，
     // 否则旧页面会继续显示“尚未配置”，与设置页的绿色“已配置”相矛盾。
@@ -625,11 +677,13 @@ async function boot(){
   OPTION_INFO = data.option_info || {};
   RECOMMENDED = data.recommended || {};
   PROJECT = data.project || {};
+  WORKBENCH_PLATFORM = data.platform || {};
+  $('addSubtitles').checked = data.generation_options?.subtitles_enabled !== false;
   PROVIDER_LABELS = data.provider_labels || {};
   const voiceReady = usableEngines('voice').length > 0;
   const avatarReady = usableEngines('avatar').length > 0;
   $('pills').innerHTML = voiceReady && avatarReady
-    ? '<span class="pill on">工作流就绪</span>'
+    ? '<span class="pill on">服务配置已保存</span>'
     : '<span class="pill">需要配置</span>';
   renderProviderSelects();
   simplifyProviders();
@@ -643,6 +697,7 @@ async function boot(){
   simplifyProviders();
   loadSettings();
   if (data.active_run) attach(data.active_run);
+  updateHints();
 }
 
 /* ================================================================ 资产 */
@@ -659,10 +714,10 @@ function applyAssets(summary){
 function renderAssetSelects(){
   const voices = ASSETS.voices || [];
   const avatars = ASSETS.avatars || [];
-  const readyVoices = voices.filter(v => v.status !== 'empty' && v.ref_audio);
+  const readyVoices = voices.filter(v => v.status !== 'empty' && (v.ref_audio || v.cloud_reference_url));
   const readyAvatars = avatars.filter(a => (a.photos||[]).length > 0);
-  const wantVoice = PROJECT.voice_id || '';
-  const wantAvatar = PROJECT.avatar_id || '';
+  const wantVoice = $('p_voice_asset').value || PROJECT.voice_id || '';
+  const wantAvatar = $('p_avatar_asset').value || PROJECT.avatar_id || '';
   $('p_voice_asset').innerHTML = readyVoices.length
     ? readyVoices.map(v => `<option value="${esc(v.id)}">${esc(v.name)}</option>`).join('')
     : `<option value="">暂无可用音色</option>` +
@@ -684,6 +739,8 @@ function renderAssetSelects(){
 
 function badge(asset){
   const ready = asset.status === 'ready' || asset.status === 'trained';
+  if ('cloud_reference_url' in asset || 'ref_audio' in asset)
+    return `<span class="badge ${ready?'ready':'empty'}">${ready?'素材已保存':'待补全素材'}</span>`;
   return `<span class="badge ${ready?'ready':'empty'}">${
     asset.status === 'trained' ? '已训练' : ready ? '就绪' : '待采集'}</span>`;
 }
@@ -762,6 +819,9 @@ function openVoiceEnroll(voiceId){
   renderVoiceList();
   if (!v) return;
   $('voiceEnroll').classList.remove('hidden');
+  $('voiceReferenceText').value = v.ref_text || '';
+  $('voiceReferenceUrl').value = v.cloud_reference_url || '';
+  $('referenceLinkStatus').textContent = v.cloud_reference_url ? '链接已保存，尚不代表云端可访问；请回创作页点击试听验证。' : '未填写链接。使用需要链接的模型时，在这里粘贴你的参考录音直链。';
   $('voiceEnrollName').innerHTML = `${esc(v.name)} <span class="ver">${esc(v.id)}</span>
     <button class="ghost tiny" style="float:right" id="btnDelVoice">删除音色</button>`;
   $('voicePlayback').classList.toggle('hidden', !v.ref_audio);
@@ -769,7 +829,7 @@ function openVoiceEnroll(voiceId){
     $('voiceAudio').src = `/api/assets/voice/audio?${q({voice_id:v.id})}&t=${Date.now()}`;
   }
   $('voiceUploadStatus').textContent = v.ref_audio
-    ? `当前样本：${v.duration_s}s　${v.note||''}` : '还没有参考音频，录音或上传后即可使用。';
+    ? `当前本地样本：${v.duration_s}s　${v.note||''}` : v.cloud_reference_url ? '参考录音链接已保存，回创作页试听以验证效果。' : '还没有参考录音。可上传本地音频，或在下方填写链接（按模型要求选择）。';
   $('btnDelVoice').onclick = async (ev) => {
     ev.stopPropagation();
     await deleteVoiceAsset(v);
@@ -778,7 +838,11 @@ function openVoiceEnroll(voiceId){
 
 $('btnNewVoice').onclick = async () => {
   const name = $('newVoiceName').value.trim();
-  if (!name) return toast('先给音色起个名字');
+  if (!name) return toast('请先给这个音色起个中文名字');
+  if (!/^[\u3007\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u{20000}-\u{2fa1f}\u{30000}-\u{3347f}]+$/u.test(name)) {
+    $('newVoiceName').focus();
+    return toast('音色名称只能使用中文汉字，不能包含英文、数字、空格或符号');
+  }
   const r = await fetch('/api/assets/voice', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({name})}).then(x=>x.json());
   if (r.error) return toast(r.error);
@@ -788,10 +852,10 @@ $('btnNewVoice').onclick = async () => {
   toast('音色已创建，请朗读下方文字并录音');
 };
 
-async function uploadVoiceBlob(blob, filename){
+async function uploadVoiceBlob(blob, filename, refText=''){
   if (!enrollVoiceId) return toast('请先选择或新建一个音色');
   $('voiceUploadStatus').textContent = '正在上传并体检…';
-  const r = await fetch('/api/assets/voice/audio?' + q({voice_id: enrollVoiceId, filename}),
+  const r = await fetch('/api/assets/voice/audio?' + q({voice_id: enrollVoiceId, filename, ref_text:refText}),
     {method:'POST', headers:{'Content-Type':'application/octet-stream'}, body: blob}).then(x=>x.json());
   if (r.error){ $('voiceUploadStatus').textContent = '上传失败'; return toast(r.error); }
   applyAssets(r.summary);
@@ -803,6 +867,28 @@ $('voiceFile').onchange = (e) => {
   const f = e.target.files[0];
   if (f) uploadVoiceBlob(f, f.name);
   e.target.value = '';
+};
+
+$('saveVoiceReferenceText').onclick = async () => {
+  if (!enrollVoiceId) return;
+  try {
+    const response = await fetch('/api/assets/voice/reference-text', {method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({voice_id:enrollVoiceId,ref_text:$('voiceReferenceText').value.trim()})});
+    const result = await response.json();
+    if (!response.ok || result.error) throw new Error(result.error || '保存失败');
+    applyAssets(result.summary); openVoiceEnroll(enrollVoiceId); toast('参考文字已保存');
+  } catch (error) { toast(error.message); }
+};
+
+$('saveVoiceReferenceUrl').onclick = async () => {
+  if (!enrollVoiceId) return;
+  try {
+    const response = await fetch('/api/assets/voice/reference-url', {method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({voice_id:enrollVoiceId,url:$('voiceReferenceUrl').value.trim()})});
+    const result = await response.json();
+    if (!response.ok || result.error) throw new Error(result.error || '保存失败');
+    applyAssets(result.summary); openVoiceEnroll(enrollVoiceId); toast('录音链接已保存');
+  } catch (error) { toast(error.message); }
 };
 
 /* 浏览器直接录音（localhost 属于安全上下文，getUserMedia 可用） */
@@ -821,7 +907,7 @@ $('btnRec').onclick = async () => {
       stream.getTracks().forEach(t => t.stop());
       const type = (recorder && recorder.mimeType) || 'audio/webm';
       const ext = type.includes('ogg') ? 'ogg' : type.includes('mp4') ? 'm4a' : 'webm';
-      await uploadVoiceBlob(new Blob(recChunks, {type}), 'recording.' + ext);
+      await uploadVoiceBlob(new Blob(recChunks, {type}), 'recording.' + ext, $('voicePrompt').textContent.trim());
     };
     recorder.start();
     recStart = Date.now();
@@ -859,6 +945,7 @@ function openAvatarEnroll(avatarId){
       ${p === a.portrait ? '<span class="primarymark">主图</span>' : ''}
       <img src="/api/assets/avatar/photo?${q({avatar_id:a.id, filename:p})}" alt="">
       <div class="ops">
+        <button class="ghost" data-use-scene="${esc(p)}">用于创作</button>
         ${p === a.portrait ? '' : `<button class="ghost" data-primary="${esc(p)}">设为主图</button>`}
         <button class="ghost" data-del="${esc(p)}">删除</button>
       </div>
@@ -869,6 +956,15 @@ function openAvatarEnroll(avatarId){
       body: JSON.stringify({avatar_id: a.id, filename: btn.dataset.primary})}).then(x=>x.json());
     if (r.error) return toast(r.error);
     applyAssets(r.summary); openAvatarEnroll(a.id); toast('已设为主图');
+  });
+  $('avatarGrid').querySelectorAll('[data-use-scene]').forEach(btn => btn.onclick = async () => {
+    try {
+      const response = await fetch('/api/scene/select', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({avatar_id:a.id, filename:btn.dataset.useScene})});
+      const scene = await response.json();
+      if (!response.ok || scene.error) throw new Error(scene.error || '选择失败');
+      $('p_avatar_asset').value = a.id;
+      displayScene(scene); jumpTo('create'); toast('已选择出镜照片');
+    } catch (error) { toast(error.message); }
   });
   $('avatarGrid').querySelectorAll('[data-del]').forEach(btn => btn.onclick = async () => {
     const r = await fetch('/api/assets/avatar/photo?' + q({avatar_id:a.id, filename:btn.dataset.del}),
@@ -914,15 +1010,35 @@ $('avatarFiles').onchange = async (e) => {
 /* ---------------------------------------------------------- 生成前检查 */
 /* 数字人口播的前提就是「要克隆的音色」+「形象参考图」。
    缺了就直接禁用生成按钮，而不是让它跑一半才失败。 */
+function voiceAssetProblems(){
+  const voice = (ASSETS.voices||[]).find(x => x.id === $('p_voice_asset').value);
+  const info = (OPTION_INFO.voice||{})[$('p_voice').value] || {};
+  if (!voice) return ['请先选择或创建音色'];
+  if (info.reference_mode === 'url' && !voice.cloud_reference_url) return ['所选语音模型需要参考录音 HTTPS 直链，请到音色库填写，不需要配置 OSS'];
+  if (info.reference_mode !== 'url' && !voice.ref_audio) return ['所选语音模型需要本地参考录音，请到音色库录音或上传'];
+  if (info.requires_reference_text && !(voice.ref_text||'').trim()) return ['所选语音模型需要录音的准确文字，请到音色库填写'];
+  if ((info.requires_reference_text || info.reference_mode === 'url') && info.max_reference_seconds && voice.duration_s > info.max_reference_seconds)
+    return [`所选模型的参考录音不能超过 ${info.max_reference_seconds} 秒，请在音色库换较短样本及对应文字或链接`];
+  return [];
+}
+function voicePreviewContext(){
+  const voice = (ASSETS.voices||[]).find(x => x.id === $('p_voice_asset').value) || {};
+  return JSON.stringify([$('p_voice').value,((OPTION_INFO.voice||{})[$('p_voice').value]||{}).model,voice.id,voice.cloud_reference_url,voice.ref_text,voice.duration_s]);
+}
 function preflightProblems(){
   const out = [];
+  if (SCRIPT_SOURCE === 'script' ? !$('script').value.trim() : !$('topic').value.trim())
+    out.push(SCRIPT_SOURCE === 'script' ? '请先填入口播文案' : '请先填写视频主题');
   const vid = $('p_voice_asset').value, aid = $('p_avatar_asset').value;
   const v = (ASSETS.voices||[]).find(x => x.id === vid);
   const a = (ASSETS.avatars||[]).find(x => x.id === aid);
   if (!vid) out.push('没有选择音色 —— 数字人口播必须指定要克隆的音色');
-  else if (!v || !v.ref_audio) out.push(`音色「${v ? v.name : vid}」还没有参考音频，先去音色库录音或上传`);
-  if (!aid) out.push('没有选择形象 —— 数字人口播必须指定形象参考图');
-  else if (!a || !(a.photos||[]).length) out.push(`形象「${a ? a.name : aid}」还没有上传照片，先去形象库上传`);
+  else out.push(...voiceAssetProblems());
+  const sceneOnly = ((OPTION_INFO.avatar||{})[$('p_avatar').value]||{}).uses_scene_photo === true;
+  if (SHOW_PHOTO_FEATURES && !sceneOnly && !usesSourceVideo()){
+    if (!aid) out.push('没有选择形象 —— 当前引擎需要独立身份参考');
+    else if (!a || !(a.photos||[]).length) out.push(`形象「${a ? a.name : aid}」还没有上传照片，先去形象库上传`);
+  }
   const voiceEngine = $('p_voice').value;
   if (!voiceEngine) out.push('还没有可用的语音引擎，请先到设置里配置');
   const voiceInfo = (OPTION_INFO.voice||{})[voiceEngine] || {};
@@ -932,7 +1048,9 @@ function preflightProblems(){
   const avatarInfo = (OPTION_INFO.avatar||{})[avatarEngine] || {};
   if (avatarEngine && avatarInfo.available !== true) out.push(`数字人接口未配置：${avatarInfo.detail||engineLabel(avatarEngine)}`);
   // 流程模式的画面来自本次场景照片，缺了就没画面
-  if (MODE === 'flow' && !SCENE){
+  if (MODE === 'flow' && (usesSourceVideo() || !SHOW_PHOTO_FEATURES) && !SOURCE_VIDEO){
+    out.push('还没选人物视频底片，请上传或从已保存素材中选择');
+  } else if (MODE === 'flow' && SHOW_PHOTO_FEATURES && !usesSourceVideo() && !SCENE){
     out.push('还没选「本次场景照片」—— 画面与背景来自这张带人物的照片');
   }
   return out;
@@ -940,23 +1058,9 @@ function preflightProblems(){
 function renderPreflight(){
   const problems = preflightProblems();
   const box = $('preflight');
-  if (MODE === 'flow'){
-    box.innerHTML = problems.length
-      ? '<div class="warnbanner" role="alert" style="margin-top:12px"><b>还缺：</b><br>· '
-        + problems.map(esc).join('<br>· ') + '</div>'
-      : '';
-    $('btn-run').disabled = problems.length > 0;
-    return;
-  }
-  if (!problems.length){
-    box.innerHTML = '';
-    $('btn-run').disabled = false;
-  } else {
-    box.innerHTML = '<div class="warnbanner" role="alert" style="margin-top:12px">'
-      + '<b>还缺：</b><br>· '
-      + problems.map(esc).join('<br>· ') + '</div>';
-    $('btn-run').disabled = true;
-  }
+  box.innerHTML = problems.length ? '<details class="advanced"><summary>查看尚缺项目（' + problems.length + '）</summary><div class="hint">· ' + problems.map(esc).join('<br>· ') + '</div></details>' : '';
+  $('btn-run').disabled = RUN_BUSY || !!PENDING_GATE || problems.length > 0;
+  updateCreationGuide();
 }
 
 /* ---------------------------------------------------------- 提示语 */
@@ -1002,7 +1106,7 @@ function usableEngines(key){
     const info = (OPTION_INFO[key] || {})[n] || {};
     if (info.available !== true) return false;
     if (key === 'voice') return isCloneEngine(n);
-    if (key === 'avatar') return isMouthEngine(n);
+    if (key === 'avatar') return isMouthEngine(n) && (SHOW_PHOTO_FEATURES || info.uses_source_video === true);
     return true;
   });
 }
@@ -1019,7 +1123,7 @@ function simplifyProviders(){
     const el = $('p_' + key);
     // 只隐藏“当前选项本来就是唯一可用项”的下拉框，绝不替用户改 provider。
     // 尤其不能因为云 API 缺 Key，就自动切到本地模型。
-    const single = usable.length === 1 && el.value === usable[0];
+    const single = key !== 'avatar' && usable.length === 1 && el.value === usable[0];
     const box = $(row);
     if (box) box.classList.toggle('hidden', single);
     if (single) hidden += 1;
@@ -1030,23 +1134,36 @@ function simplifyProviders(){
 }
 
 function updateHints(){
+  const preview = $('voicePreviewBox');
+  if (preview.dataset.context && preview.dataset.context !== voicePreviewContext()){
+    preview.innerHTML = '<p class="hint">音色或模型配置已变化，请重新试听验证。</p>';
+    delete preview.dataset.context;
+  }
   const vid = $('p_voice_asset').value;
   const engine = $('p_voice').value;
   const vname = (ASSETS.voices||[]).find(x => x.id === vid)?.name;
   const info = (OPTION_INFO.voice || {})[engine] || {};
   const ready = info.available === true;
+  const voiceMissing = vid ? voiceAssetProblems() : [];
+  $('btnVoicePreview').textContent = voiceMissing.length ? '去补全音色' : '试听音色';
 
   if (!vid){
     $('voiceHint').textContent = '请先选择音色。';
   } else if (ready){
-    $('voiceHint').innerHTML = `<b style="color:var(--ok)">${esc(vname)}</b> · ${esc(engineLabel(engine))}`;
+    $('voiceHint').innerHTML = `<b>${esc(vname)}</b> · ${esc(engineLabel(engine))}<br><span>${esc(voiceMissing[0] || '配置条件已齐备，实际声音和账号权限请先试听验证。')}</span>`;
   } else {
     $('voiceHint').innerHTML = `<span style="color:var(--warn)">${esc(engineLabel(engine))} 尚未配置</span>`;
   }
   const aid = $('p_avatar_asset').value;
   const aname = (ASSETS.avatars||[]).find(x => x.id === aid)?.name;
   const aengine = $('p_avatar').value;
-  if (!aid){
+  if (!aengine && !SHOW_PHOTO_FEATURES){
+    $('avatarHint').textContent = '请先在服务设置添加视频口型替换服务。照片服务已隐藏，没有删除。';
+  } else if (usesSourceVideo()){
+    $('avatarHint').textContent = '当前模式替换人物视频底片的口型，不使用形象参考照片。';
+  } else if (((OPTION_INFO.avatar||{})[aengine]||{}).uses_scene_photo === true){
+    $('avatarHint').textContent = '当前引擎直接驱动出镜照片，不使用独立身份参考。';
+  } else if (!aid){
     $('avatarHint').textContent = '请先选择形象。';
   } else {
     const aReady = ((OPTION_INFO.avatar||{})[aengine]||{}).available === true;
@@ -1077,10 +1194,10 @@ $('p_avatar_asset').onchange = () => {
 function renderNodes(status){
   $('nodes').innerHTML = activeNodes().map(s => {
     const st = status[s.name] || '';
-    const cls = ['ok','cached','failed','running'].includes(st) ? st : '';
+    const cls = st === 'skipped' ? 'cached' : ['ok','cached','failed','running'].includes(st) ? st : '';
     return `<div class="node ${cls}" id="node-${s.name}">
-      <div class="idx">${st==='ok'?'✓':st==='cached'?'=':st==='failed'?'✕':s.index}</div>
-      <div class="nm" title="${esc(s.title)}">${esc(s.title)}</div></div>`;
+      <div class="idx">${st==='ok'?'✓':st==='skipped'?'−':st==='cached'?'=':st==='failed'?'✕':s.index}</div>
+      <div class="nm" title="${esc(s.title)}">${esc(s.title)}${st==='skipped'?'（跳过）':''}</div></div>`;
   }).join('');
 }
 
@@ -1110,11 +1227,7 @@ $('sceneFile').onchange = async (e) => {
       .then(x => x.json());
     if (r.error){ SCENE = null; $('scenePreview').innerHTML =
       '<span style="color:var(--err)">' + esc(r.error) + '</span>'; updateHints(); return; }
-    SCENE = r;
-    $('scenePreview').innerHTML =
-      `<img src="${r.url}" style="width:100%;border-radius:8px;margin-top:6px;border:1px solid var(--line)">`
-      + `<div class="hint">${esc(r.name)} · ${r.width}×${r.height}</div>`;
-    updateHints();
+    displayScene(r);
     toast('场景照片已就绪');
   } catch (err) {
     SCENE = null;
@@ -1127,7 +1240,7 @@ function renderGatePicker(){
   $('gatePicker').innerHTML = FLOW_GATES.map(g => {
     const on = SELECTED_GATES.has(g.name);
     return `<div class="chip ${on?'gatesel':''}" data-gate="${esc(g.name)}"
-      style="${on?'border-color:var(--accent);color:#fff':''}">
+      style="${on?'border-color:var(--accent)':''}">
       ${on?'☑':'☐'} ${esc(g.title)}</div>`;
   }).join('');
   $('gatePicker').querySelectorAll('[data-gate]').forEach(el => el.onclick = () => {
@@ -1157,9 +1270,10 @@ function showGate(runId, gate, payload){
   }
   $('gateBody').innerHTML = `<div class="gatebox"><h3>${esc(title)}</h3>${body}</div>`;
   $('gateCard').classList.remove('hidden');
+  renderPreflight();
   $('gateCard').scrollIntoView({behavior:'smooth', block:'center'});
 }
-function hideGate(){ PENDING_GATE = null; $('gateCard').classList.add('hidden'); }
+function hideGate(){ PENDING_GATE = null; $('gateCard').classList.add('hidden'); updateWorkbenchView(); }
 
 async function decide(action){
   if (!PENDING_GATE) return;
@@ -1227,9 +1341,11 @@ function briefError(value){
   return String(value||'未知错误').split(/\r?\n/).map(x=>x.trim()).find(Boolean) || '未知错误';
 }
 function setRunStatus(text, cls=''){
+  RUN_BUSY = cls === 'running' || (!!source && cls === 'err');
   const box = $('runStatus');
   box.textContent = text;
   box.className = 'runstatus' + (cls ? ' ' + cls : '');
+  renderPreflight();
 }
 
 function resetHistoryView(){
@@ -1241,8 +1357,9 @@ function resetHistoryView(){
   $('log').dataset.clean = '0';
   $('log').innerHTML = '<span class="t">等待开始…</span>';
   $('planbox').innerHTML = '';
-  $('result').innerHTML = '<div class="empty">还没有结果。<br>点左边「开始生成」跑一条。</div>';
+  $('result').innerHTML = '<div class="video-placeholder"><div class="empty">生成后，视频会显示在这里<br><span class="hint">可以预览和下载，无需切换页面</span></div></div>';
   hideGate();
+  updateWorkbenchView();
 }
 function overrides(){
   return {
@@ -1250,17 +1367,22 @@ function overrides(){
     'steps.voice.provider':    $('p_voice').value,
     'steps.visuals.provider':  $('p_visuals').value,
     'steps.avatar.provider':   $('p_avatar').value,
+    'steps.subtitles.enabled': $('addSubtitles').checked,
+    'project.export_mode': $('exportMode').value,
     'project.voice_id':        $('p_voice_asset').value,
     'project.avatar_id':       $('p_avatar_asset').value,
   };
 }
 function payload(){
-  return { topic: $('topic').value, script_text: $('script').value, overrides: overrides() };
+  return { topic: SCRIPT_SOURCE === 'topic' ? $('topic').value : '', script_text: SCRIPT_SOURCE === 'script' ? $('script').value : '', overrides: overrides(), source_video:usesSourceVideo() && SOURCE_VIDEO ? SOURCE_VIDEO.path : '' };
 }
 
 async function doPlan(){
-  const r = await fetch('/api/plan', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify(payload())}).then(x=>x.json());
+  let r;
+  try {
+    r = await fetch('/api/plan', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({...payload(), mode:MODE, scene_photo:SCENE ? SCENE.path : ''})}).then(x=>x.json());
+  } catch (error) { toast('读取计划失败：' + error.message); return; }
   if (r.error) return toast(r.error);
   if (r.problems && r.problems.length){
     $('planbox').innerHTML = '<div style="color:var(--warn)"><b>⚠ 前置检查未通过：</b><br>· '
@@ -1268,14 +1390,18 @@ async function doPlan(){
     renderPreflight();
     return;
   }
-  renderNodes(Object.fromEntries(r.steps.map(s => [s.name, s.action==='skip'?'cached':''])));
+  renderNodes(Object.fromEntries(r.steps.map(s => [s.name, s.action==='skip'?(s.disabled?'skipped':'cached'):''])));
   $('planbox').innerHTML = r.steps.map(s =>
-    `<div class="${s.action}">${s.index}. ${esc(s.title)} — ${s.action==='run'?'将执行':'复用已有产物'}（${esc(s.reason)}）</div>`).join('');
+    `<div class="${s.action}">${s.index}. ${esc(s.title)} — ${s.action==='run'?'将执行':s.disabled?'将跳过':'复用已有产物'}（${esc(s.reason)}）</div>`).join('');
   toast('计划已生成（未执行）');
+  updateWorkbenchView();
 }
 
 async function doRun(){
+  HISTORY_REQUEST += 1;
   VIEWING_HISTORY = false;
+  RUN_ID = null;
+  $('runid').textContent = '';
   $('btn-run').disabled = true; $('btn-plan').disabled = true;
   hideGate();
   $('log').dataset.clean = '0';
@@ -1290,8 +1416,16 @@ async function doRun(){
     body.gates = [...SELECTED_GATES];
     body.scene_photo = SCENE ? SCENE.path : '';
   }
-  const r = await fetch(endpoint, {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify(body)}).then(x=>x.json());
+  let r;
+  try {
+    r = await fetch(endpoint, {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)}).then(x=>x.json());
+  } catch (error) {
+    $('btn-plan').disabled = false;
+    setRunStatus('无法启动生成：' + error.message, 'err');
+    showFailure(error.message, [], '启动失败');
+    return;
+  }
   if (r.error){
     toast(r.error); $('btn-plan').disabled = false; renderPreflight();
     setRunStatus(briefError(r.error), 'err');
@@ -1304,11 +1438,13 @@ function attach(runId){
   if (source) source.close();
   VIEWING_HISTORY = false;
   RUN_ID = runId;
+  RUN_BUSY = true;
   $('runid').textContent = runId;
   $('btn-run').disabled = true; $('btn-plan').disabled = true;
   source = new EventSource('/api/stream?run_id=' + encodeURIComponent(runId));
   source.onmessage = e => handle(JSON.parse(e.data));
   source.onerror = () => { source.close(); source = null; };
+  updateWorkbenchView();
 }
 
 function handle(ev){
@@ -1328,8 +1464,12 @@ function handle(ev){
     logLine(ev.line, cls);
   } else if (ev.type === 'step_done'){
     const n = $('node-'+ev.step);
-    if (n) n.className = 'node ' + (ev.status==='ok'?'ok':ev.status==='cached'?'cached':'failed');
-    if (ev.status === 'cached') logLine(`  = ${ev.step} 复用已有产物`, 't');
+    if (n) n.className = 'node ' + (ev.status==='ok'?'ok':['cached','skipped'].includes(ev.status)?'cached':'failed');
+    if (ev.status === 'skipped'){
+      if (n){ n.querySelector('.idx').textContent = '−'; n.querySelector('.nm').textContent = '字幕（跳过）'; }
+      logLine('  − 已关闭字幕，跳过此步', 't');
+    }
+    else if (ev.status === 'cached') logLine(`  = ${ev.step} 复用已有产物`, 't');
     else if (ev.status === 'ok') logLine(`  ✓ ${ev.step} 完成（${ev.duration_s ?? '?'}s）`, 'ok');
     else {
       const title = (activeNodes().find(s => s.name === ev.step)||{}).title || ev.step;
@@ -1395,7 +1535,7 @@ function renderResult(r, runId){
   if (!audio.real){
     banner = `<div class="warnbanner"><b>⚠ 这条成片是静音的。</b>
       语音 provider = <code>${esc(audio.provider||'未知')}</code> ${esc(audio.note||'')}<br>
-      修法：把「语音引擎」切到 <b>edge_native</b>，再点开始生成。</div>`;
+      请检查所选语音服务和参考音频，不会自动切换成其他音色。</div>`;
   } else if (audio.cloned){
     banner = `<div class="okbanner">语音：<b>已用你的音色「${esc(audio.voice_name)}」</b>（${esc(audio.provider)}）</div>`;
   } else if (audio.voice_name){
@@ -1404,7 +1544,7 @@ function renderResult(r, runId){
   } else {
     banner = `<div class="okbanner">语音：${esc(audio.provider)}　${esc(audio.note||'')}</div>`;
   }
-  if (r.avatar && !r.avatar.used_portrait && r.avatar.id){
+  if (r.avatar && !r.avatar.used_portrait && r.avatar.id && !r.avatar.uses_scene_photo && !r.avatar.uses_source_video){
     banner += `<div class="warnbanner">形象：选择了形象资产，但没能用上（可能没上传照片）。当前只有背景画面。</div>`;
   }
 
@@ -1415,10 +1555,11 @@ function renderResult(r, runId){
         <video src="${v}" poster="${cover}" controls preload="metadata"></video>
         <div class="meta-line">时长 ${r.duration_s ?? '?'}s · ${esc(r.topic||'')}</div>
         <div class="btns">
+          <a class="primary action-link" href="${v}" download="${esc(runId)}.mp4">下载成片</a>
           <button class="ghost" id="btn-reveal">打开运行目录</button>
         </div>
       </div>
-      <div>
+      <details class="result-meta"><summary>封面、标题与视频简介</summary>
         ${cover ? `<img class="cover" src="${cover}" alt="封面">` : ''}
         <label>标题候选（点击复制）</label>
         <div class="chips">${(r.titles||[]).map(t =>
@@ -1428,13 +1569,14 @@ function renderResult(r, runId){
           `<div class="chip tag">#${esc(t)}</div>`).join('') || '<span class="ver">无</span>'}</div>
         <label>视频简介</label>
         <textarea readonly style="min-height:70px">${esc(r.description||'')}</textarea>
-      </div>
+      </details>
     </div>`;
   $('result').querySelectorAll('.chip.copyable').forEach(el => el.onclick = () => copyText(el));
   const tagbox = $('tagbox');
   if (tagbox) tagbox.onclick = () => copyText(tagbox);
   const revealBtn = $('btn-reveal');
   if (revealBtn) revealBtn.onclick = () => reveal(runId);
+  updateWorkbenchView();
 }
 
 function copyText(el){
@@ -1448,11 +1590,13 @@ async function reveal(runId){
 }
 
 /* ================================================================ 历史 */
+let DELETE_RUN = null, DELETING_RUN = false;
 async function loadRuns(){
   const r = await fetch('/api/runs').then(x=>x.json());
   renderRuns(r.runs || []);
 }
 function renderRuns(runs){
+  $('historyCount').textContent = `最近 ${runs.length} 条`;
   if (!runs.length){ $('runs').innerHTML = '<div class="empty">还没有运行记录</div>'; return; }
   $('runs').innerHTML = runs.map(x => `
     <div class="runitem" data-run="${esc(x.run_id)}">
@@ -1461,6 +1605,7 @@ function renderRuns(runs){
       <span class="runops">
         ${x.has_partial ? `<button class="ghost" data-fragments="${esc(x.run_id)}">片段</button>` : ''}
         ${x.can_resume ? `<button class="primary" data-continue="${esc(x.run_id)}">继续</button>` : ''}
+        <button class="danger" data-delete-run="${esc(x.run_id)}" ${x.running ? 'disabled title="正在运行，结束后可删除"' : ''}>删除</button>
       </span>
     </div>`).join('');
   $('runs').querySelectorAll('.runitem').forEach(el =>
@@ -1473,9 +1618,64 @@ function renderRuns(runs){
     ev.stopPropagation();
     continueRun(btn.dataset.continue);
   });
+  $('runs').querySelectorAll('[data-delete-run]').forEach(btn => btn.onclick = ev => {
+    ev.stopPropagation();
+    openDeleteRun(runs.find(x => x.run_id === btn.dataset.deleteRun));
+  });
+}
+function openDeleteRun(run){
+  if (!run || run.running || DELETING_RUN) return;
+  DELETE_RUN = run;
+  $('deleteRunName').textContent = run.topic || run.run_id;
+  $('deleteRunDirectory').textContent = '本地目录：' + (run.directory || run.run_id);
+  $('deleteRunFiles').checked = false;
+  $('deleteRunError').textContent = '';
+  updateDeleteRunHint();
+  $('deleteRunDialog').showModal();
+  $('cancelDeleteRun').focus();
+}
+function updateDeleteRunHint(){
+  const files = $('deleteRunFiles').checked;
+  $('deleteRunHint').textContent = files
+    ? '删除这次运行的全部文件和恢复检查点，删除后无法继续或下载。音色库和形象库不受影响。'
+    : '只删除历史记录，视频、音频等文件仍保留在本地；这条记录不再提供继续和下载入口。';
+  $('confirmDeleteRun').textContent = files ? '删除记录和文件' : '删除记录';
+}
+async function deleteSelectedRun(){
+  if (!DELETE_RUN || DELETING_RUN) return;
+  const runId = DELETE_RUN.run_id;
+  DELETING_RUN = true;
+  for (const id of ['confirmDeleteRun', 'cancelDeleteRun', 'deleteRunFiles']) $(id).disabled = true;
+  $('confirmDeleteRun').textContent = '正在删除…';
+  $('deleteRunError').textContent = '';
+  try {
+    const response = await fetch('/api/runs', {method:'DELETE', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({run_id:runId, delete_files:$('deleteRunFiles').checked})});
+    const r = await response.json();
+    if (!response.ok || r.error) throw new Error(r.error || '删除失败');
+    if (RUN_ID === runId){
+      if (source){ source.close(); source = null; }
+      resetHistoryView();
+      $('btn-plan').disabled = false;
+      renderPreflight();
+    }
+    $('deleteRunDialog').close();
+    DELETE_RUN = null;
+    toast(r.files_deleted ? '记录和本地文件已删除' : '记录已删除，本地文件已保留');
+    await loadRuns();
+  } catch (error){
+    if ($('deleteRunDialog').open) $('deleteRunError').textContent = error.message || '删除失败，请重试';
+    else toast('记录已删除，列表刷新失败，请刷新页面');
+  } finally {
+    DELETING_RUN = false;
+    for (const id of ['confirmDeleteRun', 'cancelDeleteRun', 'deleteRunFiles']) $(id).disabled = false;
+    updateDeleteRunHint();
+  }
 }
 async function openRun(runId){
+  const request = ++HISTORY_REQUEST;
   const r = await fetch('/api/result?run_id=' + encodeURIComponent(runId)).then(x=>x.json());
+  if (request !== HISTORY_REQUEST) return;
   if (r.error) return toast(r.error);
   RUN_ID = runId; $('runid').textContent = runId;
   VIEWING_HISTORY = !r.running;
@@ -1490,6 +1690,7 @@ async function openRun(runId){
   // 流程跑停在闸门上时，回看也要能把审批按钮调出来
   if (r.gate && r.gate.gate) showGate(runId, r.gate.gate, r.payload || r.gate.payload);
   else hideGate();
+  updateWorkbenchView();
   window.scrollTo({top:0, behavior:'smooth'});
 }
 
@@ -1514,7 +1715,7 @@ function fillPresetOptions(){
   const kind = $('sp_kind').value;
   // 用途由预设自己声明（后端 PRESET_KINDS）。以前这里硬编码了一份数字人名单，
   // 加一家预设就要改前端 —— 和 option_names 踩过的是同一个坑。
-  const list = PRESETS.filter(p => (p.kind || 'avatar') === kind);
+  const list = PRESETS.filter(p => (p.kind || 'avatar') === kind && (kind !== 'avatar' || SHOW_PHOTO_FEATURES || p.uses_source_video));
   $('sp_preset').innerHTML = list.length
     ? list.map(p => `<option value="${esc(p.name)}">${esc(p.label)}</option>`).join('')
     : '<option value="">（这个用途还没有预设）</option>';
@@ -1569,6 +1770,19 @@ function selectedModelId(){
     : $('sp_model').value.trim();
 }
 
+function updateModelDetails(){
+  const p = currentPreset();
+  const model = (p.models || []).find(item => item.id === selectedModelId()) || {};
+  $('sp_model_hint').textContent = model.hint || '';
+  if (!p.editable_endpoint){
+    let endpoint = String(model.endpoint || p.endpoint || '');
+    $('sp_extra_fields').querySelectorAll('[data-provider-field]').forEach(input => {
+      endpoint = endpoint.replaceAll('{{' + input.dataset.providerField + '}}', input.value.trim() || '{{' + input.dataset.providerField + '}}');
+    });
+    $('sp_base_url').value = endpoint;
+  }
+}
+
 function applyPresetDefaults(config={}){
   const p = currentPreset();
   renderPresetFields(config);
@@ -1584,6 +1798,10 @@ function applyPresetDefaults(config={}){
     ? '自建或兼容接口可修改地址。'
     : '官方固定接口，已自动填写，无需修改。';
   renderModelOptions(config);
+  $('sp_model').classList.toggle('hidden',p.fixed_model === true);
+  $('spSelectedModel').textContent = p.label || '';
+  $('spPresetRow').classList.add('hidden');
+  updateModelDetails();
 }
 
 function renderPresetFields(values={}){
@@ -1620,13 +1838,13 @@ function renderProviderList(list){
     {kind:'avatar', list:'providerListAvatar', count:'avatarProviderCount', empty:'尚未配置数字人提供商'},
   ];
   for (const group of groups){
-    const items = list.filter(p => p.kind === group.kind);
+    const items = list.filter(p => p.kind === group.kind && (group.kind !== 'avatar' || SHOW_PHOTO_FEATURES || p.config?.input_media === 'video'));
     const ready = items.filter(p => p.available === true).length;
-    $(group.count).textContent = `${items.length} 家${ready ? ` · ${ready} 可用` : ''}`;
+    $(group.count).textContent = `${items.length} 个模型${ready ? ` · ${ready} 已保存密钥` : ''}`;
     $(group.list).innerHTML = items.length ? items.map(p => {
       const enabled = p.enabled !== false;
       const usable = enabled && p.available === true;
-      const status = !enabled ? '已停用' : usable ? '已配置' : (p.availability_detail || '待配置');
+      const status = !enabled ? '已停用' : usable ? '配置已保存' : (p.availability_detail || '待配置');
       const badge = usable ? 'ready' : 'empty';
       const preset = PRESETS.find(x => x.name === p.preset);
       const modelId = String((p.config && p.config.model) || p.model || '');
@@ -1646,6 +1864,7 @@ function renderProviderList(list){
               <span class="badge ${badge}">${status}</span>
             </div>
             <div class="provider-item-meta" title="${esc(meta)}">${esc(meta)}</div>
+            ${group.kind==='voice' ? `<p class="hint">${(p.config?.clone?.reference_mode === 'public_url')?'录音准备：音色库填写 HTTPS 音频直链，无需 OSS 配置。':p.config?.clone?.requires_reference_text?'录音准备：上传本地录音，填写与录音完全一致的文字。':'录音准备：按此服务的样本要求准备。'}</p>` : ''}
             ${keyLink}
             <div class="provider-test-status" data-test-status="${esc(p.id)}" role="status"></div>
           </div>
@@ -1706,7 +1925,7 @@ async function testProviderConnection(id, button){
   status.textContent = `${result.ok ? '✓ ' : '✕ '}${result.message || '测试完成'}${suffix}`;
 }
 
-function openProviderEditor(kind, provider=null){
+function openProviderEditor(kind, provider=null, presetName=''){
   EDIT_PROVIDER_ID = provider ? provider.id : '';
   $('sp_kind').value = kind;
   $('sp_status').textContent = '';
@@ -1718,17 +1937,31 @@ function openProviderEditor(kind, provider=null){
   $('sp_api_key').value = '';
   $('sp_api_key').placeholder = provider && provider.has_key ? '已保存，留空即不修改' : '粘贴密钥';
   fillPresetOptions();
-  if (provider){
-    $('sp_preset').value = provider.preset || '';
-    applyPresetDefaults({...provider.config, label:provider.label});
+  if (provider || presetName){
+    $('sp_preset').value = provider ? provider.preset : presetName;
+    applyPresetDefaults(provider ? {...provider.config, label:provider.label} : {});
     updatePresetHint();
   }
   const noun = kind === 'voice' ? '语音提供商' : '数字人提供商';
   $('providerEditorTitle').textContent = `${provider ? '编辑' : '添加'}${noun}`;
   $('providerEditorSub').textContent = provider ? provider.label : '选择模板并填写 API Key';
-  $('spAdvanced').open = Boolean($('sp_base_url').value || selectedModelId());
+  $('spAdvanced').open = false;
+  $('providerCatalog').classList.add('hidden');
   $('providerEditor').classList.remove('hidden');
   $('providerEditor').scrollIntoView({behavior:'smooth', block:'nearest'});
+}
+
+function showProviderCatalog(kind){
+  clearProviderForm();
+  $('providerCatalogTitle').textContent = kind === 'voice' ? '添加一个语音模型' : '添加视频口型替换服务';
+  const candidates = PRESETS.filter(p => p.kind === kind && (kind !== 'avatar' || SHOW_PHOTO_FEATURES || p.uses_source_video));
+  const primary = p => ['siliconflow','dashscope_videoretalk','aliyun_voice_cosyvoice_v3_5_flash','aliyun_voice_qwen_audio_3_0_tts_flash'].includes(p.name);
+  const card = p => `<article class="model-choice"><b>${esc(p.label)}</b><p class="hint">${esc(p.models?.[0]?.hint || p.capability || '请按此模型要求配置。')}</p><div class="photo-actions"><button class="ghost tiny" data-select-preset="${esc(p.name)}">配置这个模型</button>${p.key_url?`<a href="${esc(p.key_url)}" target="_blank" rel="noopener noreferrer">申请 Key</a>`:''}</div></article>`;
+  const common = candidates.filter(primary), more = candidates.filter(p=>!primary(p));
+  $('providerCatalogCards').innerHTML = common.map(card).join('') + (more.length ? `<details class="advanced"><summary>其他供应商与模型（${more.length} 项）</summary>${more.map(card).join('')}</details>` : '');
+  $('providerCatalogCards').querySelectorAll('[data-select-preset]').forEach(button=>button.onclick=()=>openProviderEditor(kind,null,button.dataset.selectPreset));
+  $('providerCatalog').classList.remove('hidden');
+  $('providerCatalog').scrollIntoView({behavior:'smooth',block:'nearest'});
 }
 
 async function saveProvider(){
@@ -1790,12 +2023,12 @@ function clearProviderForm(){
 
 /** 推荐提供商窗口：音频 / 视频各一个。 */
 function showRecommend(kind){
-  const list = REC_CATALOG[kind] || [];
+  const list = (REC_CATALOG[kind] || []).filter(item => kind !== 'video' || SHOW_PHOTO_FEATURES || PRESETS.some(p=>p.name===item.preset && p.uses_source_video));
   $('recTitle').textContent = kind === 'voice'
     ? '语音克隆推荐与 Key 申请' : '数字人视频推荐与 Key 申请';
   $('recIntro').innerHTML = kind === 'voice'
     ? '选择支持<b>音色克隆</b>的服务。先去官网申请 Key，再使用对应模板。'
-    : '选择能由音频直接驱动口型、表情和动作的服务。先去官网申请 Key，再使用对应模板。';
+    : SHOW_PHOTO_FEATURES ? '选择对应照片或视频模式的服务，先申请 Key，再配置。' : '当前仅显示人物视频底片服务。身体动作来自底片，服务替换口型；照片类推荐已隐藏，可在兼容功能中恢复。';
   $('recList').innerHTML = list.map(p => {
     const keyUrl = p.key_url || p.homepage || '';
     return `
@@ -1835,33 +2068,42 @@ async function refreshBootstrap(){
   OPTIONS = data.options || {};
   CURRENT = data.current || CURRENT;
   OPTION_INFO = data.option_info || {};
+  PROVIDER_LABELS = data.provider_labels || {};
+  WORKBENCH_PLATFORM = data.platform || WORKBENCH_PLATFORM;
   RECOMMENDED = data.recommended || {};
   renderProviderSelects();
   simplifyProviders();
   const voiceReady = usableEngines('voice').length > 0;
   const avatarReady = usableEngines('avatar').length > 0;
   $('pills').innerHTML = voiceReady && avatarReady
-    ? '<span class="pill on">工作流就绪</span>'
+    ? '<span class="pill on">服务配置已保存</span>'
     : '<span class="pill">需要配置</span>';
   updateHints();
 }
 
 $('btn-run').onclick = doRun;
+$('deleteRunFiles').onchange = updateDeleteRunHint;
+$('confirmDeleteRun').onclick = deleteSelectedRun;
+$('cancelDeleteRun').onclick = () => $('deleteRunDialog').close();
+$('deleteRunDialog').oncancel = event => { if (DELETING_RUN) event.preventDefault(); };
 $('btn-plan').onclick = doPlan;
 $('btnVoicePreview').onclick = voicePreview;
 $('btnRecVoice').onclick = () => showRecommend('voice');
 $('btnRecVideo').onclick = () => showRecommend('video');
-$('btnAddVoice').onclick = () => openProviderEditor('voice');
-$('btnAddAvatar').onclick = () => openProviderEditor('avatar');
+$('btnAddVoice').onclick = () => showProviderCatalog('voice');
+$('btnAddAvatar').onclick = () => showProviderCatalog('avatar');
+$('closeProviderCatalog').onclick = () => $('providerCatalog').classList.add('hidden');
 $('btnRecClose').onclick = () => $('recCard').classList.add('hidden');
 $('btnSaveProvider').onclick = saveProvider;
 $('btnClearProvider').onclick = () => clearProviderForm();
 $('btnCloseProvider').onclick = () => clearProviderForm();
 $('sp_preset').onchange = () => { applyPresetDefaults(); updatePresetHint(); };
+$('sp_extra_fields').addEventListener('input', updateModelDetails);
 $('sp_model').onchange = () => {
   const custom = $('sp_model').value === '__custom__';
   $('sp_model_custom').classList.toggle('hidden', !custom);
   if (custom) $('sp_model_custom').focus();
+  updateModelDetails();
 };
 $('btnApprove').onclick = () => decide('approve');
 $('btnReject').onclick = () => decide('reject');
@@ -1875,7 +2117,12 @@ $('btnRecommended').onclick = () => {
   updateHints();
   toast(applied.length ? '已切到：' + applied.join(' / ') : '没有可推荐的配置');
 };
-boot();
+initializeWorkbench();
+boot().catch(error => {
+  $('readyText').textContent = '工作台加载失败，请刷新页面。';
+  $('nextAction').textContent = error.message;
+  $('btn-run').disabled = true;
+});
 </script>
 </body>
 </html>

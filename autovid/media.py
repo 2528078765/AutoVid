@@ -136,7 +136,7 @@ def probe_media(path: Path | str) -> dict[str, Any]:
         proc = subprocess.run(
             [
                 ffprobe_exe(), "-v", "error",
-                "-show_entries", "stream=codec_type,codec_name,width,height,duration",
+                "-show_entries", "stream=codec_type,codec_name,width,height,duration,avg_frame_rate",
                 "-show_entries", "format=duration",
                 "-of", "json", str(path),
             ],
@@ -168,6 +168,11 @@ def probe_media(path: Path | str) -> dict[str, Any]:
     if duration is None and video:
         duration = _num(video.get("duration"))
 
+    rate = str((video or {}).get("avg_frame_rate") or "0/1").split("/")
+    try:
+        video_fps = float(rate[0]) / float(rate[1]) if len(rate) == 2 else float(rate[0])
+    except (ValueError, ZeroDivisionError):
+        video_fps = 0.0
     return {
         "ok": bool(audio or video),
         "has_audio": audio is not None,
@@ -176,6 +181,8 @@ def probe_media(path: Path | str) -> dict[str, Any]:
         "width": video.get("width") if video else None,
         "height": video.get("height") if video else None,
         "codec": (audio or video or {}).get("codec_name"),
+        "video_codec": (video or {}).get("codec_name"),
+        "fps": video_fps,
         "error": None if (audio or video) else "文件里没有音频流也没有视频流",
     }
 

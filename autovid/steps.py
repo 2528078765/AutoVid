@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import random
+import shutil
 from pathlib import Path
 from typing import Any, Callable
 
@@ -426,6 +427,9 @@ def _subtitle_events_for(segment: dict[str, Any], max_chars: int) -> list[dict[s
 
 
 def step_subtitles(ctx: RunContext, state: dict, log: Logger) -> None:
+    if not ctx.config.step_enabled("subtitles"):
+        log("未选择添加字幕，跳过字幕生成")
+        return
     script = state["script"]
     voice = state["voice_segments"]
     cfg = ctx.config.step_cfg("subtitles")
@@ -522,10 +526,11 @@ def step_compose(ctx: RunContext, state: dict, log: Logger) -> None:
 
     clips = [ctx.path(c["file"]) for c in avatar["clips"]]
     voice_wav = ctx.artifact_path("voice")
-    ass_path = ctx.artifact_path("subtitles")
+    subtitles_enabled = ctx.config.step_enabled("subtitles")
+    ass_path = ctx.artifact_path("subtitles") if subtitles_enabled else None
     if voice_wav is None:
         raise AutoVidError("[compose] 找不到 voice.wav 产物")
-    if ass_path is None:
+    if subtitles_enabled and (ass_path is None or not ass_path.is_file()):
         raise AutoVidError("[compose] 找不到字幕产物")
 
     log("拼接视频轨...")
@@ -535,9 +540,14 @@ def step_compose(ctx: RunContext, state: dict, log: Logger) -> None:
     av = M.mux_audio(vtrack, voice_wav, out / "av.mp4", cwd=out,
                      audio_bitrate=str(platform.get("audio_bitrate", "192k")))
 
-    log("烧录字幕...")
-    final = M.burn_subtitles(av, ass_path, out / "final.mp4", cwd=out,
-                             crf=int(platform.get("crf", 20)))
+    if subtitles_enabled:
+        log("烧录字幕...")
+        final = M.burn_subtitles(av, ass_path, out / "final.mp4", cwd=out,
+                                 crf=int(platform.get("crf", 20)))
+    else:
+        log("不添加字幕，直接保留已合并的音视频")
+        final = out / "final.mp4"
+        shutil.copyfile(av, final)
 
     # 封面：复用 libass，中文渲染无坑；同时出 3:4 版本（部分场景推荐）
     log("渲染封面...")

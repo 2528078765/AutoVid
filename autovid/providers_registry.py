@@ -22,6 +22,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from .dashscope_voice import MODELS as _ALI_VOICE_MODELS, configure as _ali_voice_config, preset_name as _ali_voice_preset
+
 PROVIDERS_PATH = Path("config/providers.json")
 SECRETS_PATH = Path("config/secrets.json")
 
@@ -29,6 +31,7 @@ KINDS = ("voice", "avatar")
 
 # 预设 → 协议模板。加一家新厂商 = 往这里加一份模板，不用改代码。
 # 模板变量：{{api_key}} {{text}} {{voice_id}} {{model}} {{voice_name}}
+# 克隆时 voice_name 是系统生成的 ASCII 标识；中文显示名为 voice_display_name。
 #           {{audio_base64}} {{audio_format}} {{new_voice_id}} {{prompt_text}}
 PRESETS: dict[str, dict[str, Any]] = {
     # ---------------------------------------------------------------- 语音
@@ -101,6 +104,7 @@ PRESETS: dict[str, dict[str, Any]] = {
             ],
             "clone": {
                 "enabled": True,
+                "requires_reference_text": True,
                 # 硅基流动要求参考音频 ≤30 秒（实测报
                 # "audio longer than 30s is not supported"），超了自动裁前 25 秒（贴边 30 会被判超标）。
                 "max_audio_s": 25,
@@ -934,10 +938,98 @@ PRESET_KINDS: dict[str, str] = {
     "minimax": "voice", "elevenlabs": "voice", "fish_audio": "voice",
     "dashscope": "voice", "volcengine": "voice",
     "siliconflow_motion": "avatar", "d_id": "avatar", "heygen": "avatar", "minimax_h3": "avatar",
-    "dashscope_s2v": "avatar", "fal": "avatar", "fal_omnihuman": "avatar",
+    "dashscope_s2v": "avatar", "dashscope_videoretalk": "avatar", "fal": "avatar", "fal_omnihuman": "avatar",
     "replicate": "avatar",
     "custom_http_job": "avatar",
 }
+
+# Keep video input separate from Wan's photo protocol; do not migrate existing entries.
+PRESETS["dashscope_videoretalk"] = {
+    "label": "阿里云百炼（视频口型替换）",
+    "homepage": "https://help.aliyun.com/zh/model-studio/videoretalk/",
+    "key_url": "https://bailian.console.aliyun.com/",
+    "api_key_env": "AUTOVID_DASHSCOPE_KEY",
+    "config": {
+        "protocol": "videoretalk", "input_media": "video", "model": "videoretalk",
+        "submit": {"url": "https://dashscope.aliyuncs.com/api/v1/services/aigc/image2video/video-synthesis"},
+        "query": {"url": "https://dashscope.aliyuncs.com/api/v1/tasks/{{job_id}}"},
+        "timeout_s": 1800, "poll_interval_s": 10,
+        "connection_test": {
+            "url": "https://dashscope.aliyuncs.com/api/v1/uploads?action=getPolicy&model=videoretalk",
+            "method": "GET", "headers": {"Authorization": "Bearer {{api_key}}"},
+            "success_statuses": [200],
+            "json_assert": {"path": "data.policy", "truthy": True},
+            "failure_message": "上传接口没有返回有效临时凭证，请检查北京地域 Key 和 VideoRetalk 调用权限",
+            "success_message": "Key 和上传接口可用；生成权限、余额及效果仍需短片验证（未提交付费任务）",
+        },
+        "capabilities": {
+            "verified": False, "source": "阿里云官方 VideoRetalk API 文档",
+            "output": {"note": "保留人物底片分辨率与帧率，不自动换装、换脸或生成新手势"},
+            "audio": {"max_s": 119.99, "max_mb": 30, "formats": ["wav", "mp3", "aac"],
+                      "note": "总配音大于 2 秒、小于 120 秒，底片必须不短于配音"},
+        },
+        "failure_signatures": [
+            {"name": "retalk_auth", "when": {"status_in": [401]}, "kind": "fatal",
+             "label": "VideoRetalk API Key 无效", "hint": "请使用华北2（北京）地域的百炼 Key"},
+            {"name": "retalk_quota", "when": {"body_has": "Arrearage"}, "kind": "fatal",
+             "label": "百炼账户欠费", "hint": "请查看账单并结清欠费后重试"},
+            {"name": "retalk_access", "when": {"status_in": [403]}, "kind": "fatal",
+             "label": "VideoRetalk 调用被拒", "hint": "检查模型权限、免费额度用完即停设置和账户余额"},
+        ],
+    },
+}
+PRESET_UI["dashscope_videoretalk"] = {
+    "label": "阿里云百炼（视频口型替换）",
+    "models": [{"id": "videoretalk", "label": "VideoRetalk 人物视频口型替换"}],
+}
+
+# Preserve the existing preset ID; model-owned contracts come from one catalog.
+PRESETS["dashscope_qwen_voice"] = {
+    "label": "阿里云百炼",
+    "homepage": "https://help.aliyun.com/zh/model-studio/qwen3-tts-vc",
+    "key_url": "https://bailian.console.aliyun.com/",
+    "api_key_env": "AUTOVID_DASHSCOPE_KEY",
+    "fields": [{"name": "workspace_id", "label": "北京业务空间 ID", "required": True,
+                "placeholder": "ws-xxxxxxxx 或 llm-xxxxxxxx", "hint": "与所用北京地域 Key 对应，可复用已有百炼业务空间。"}],
+    "config": {
+        "workspace_id": "", "model": "qwen3-tts-vc-2026-01-22", "timeout_s": 300,
+        "connection_test": {
+            "url": "https://{{workspace_id}}.cn-beijing.maas.aliyuncs.com/api/v1/models/permissions?model={{model}}&authorization_scope=AUTHORIZED&action=INFERENCE&page_no=1&page_size=20",
+            "method": "GET", "headers": {"Authorization": "Bearer {{api_key}}"},
+            "json_assert": {"path": "output.permissions.0.permissions.inference", "equals": True},
+            "success_message": "Key、业务空间和合成模型权限检查通过；尚未创建音色或合成收费音频",
+            "failure_message": "权限检查未能确认当前模型可用，请核对模型授权、地域和接口返回；这不等同于 Key 无效",
+        },
+    },
+}
+PRESETS["dashscope_qwen_voice"]["homepage"] = "https://help.aliyun.com/zh/model-studio/voice-cloning-user-guide"
+PRESETS["dashscope_qwen_voice"]["config"] = _ali_voice_config(PRESETS["dashscope_qwen_voice"]["config"])
+PRESET_UI["dashscope_qwen_voice"] = {"label": "阿里云百炼",
+    "models": _ALI_VOICE_MODELS}
+PRESET_KINDS["dashscope_qwen_voice"] = "voice"
+PRESETS["dashscope"]["hidden"] = True  # Existing entries remain; hide the obsolete creation template.
+PRESETS["dashscope_qwen_voice"]["hidden"] = True  # Legacy ID remains readable.
+for _model in _ALI_VOICE_MODELS:
+    _name = _ali_voice_preset(_model["id"])
+    _preset = copy.deepcopy(PRESETS["dashscope_qwen_voice"])
+    _preset.pop("hidden", None)
+    _preset["label"] = "阿里云 · " + _model["label"]
+    _preset["config"] = _ali_voice_config({**_preset["config"], "model": _model["id"]})
+    PRESETS[_name] = _preset
+    PRESET_KINDS[_name] = "voice"
+    PRESET_UI[_name] = {"label": _preset["label"], "models": [_model], "fixed_model": True}
+
+
+def _is_ali_voice(preset: str) -> bool:
+    return preset == "dashscope_qwen_voice" or preset.startswith("aliyun_voice_")
+
+
+def _voice_config(preset: str, config: dict) -> dict:
+    if preset.startswith("aliyun_voice_"):
+        if preset not in PRESETS:
+            raise ValueError("找不到此语音模型，请从模型卡片重新添加")
+        config = {**config, "model": PRESETS[preset]["config"]["model"]}
+    return _ali_voice_config(config)
 
 # 没声明能力的预设，明确写下「我不知道」，而不是留空。
 # 留空和「无限制」在数据上长得一样（都是 0），但含义相反：
@@ -1012,6 +1104,14 @@ def load_entries(config: Any) -> list[dict[str, Any]]:
     for item in entries:
         if isinstance(item, dict) and item.get("id"):
             item = dict(item)
+            if _is_ali_voice(str(item.get("preset") or "")):
+                # Stored templates used to freeze Qwen's body even after changing
+                # model ID. Derive official protocol fields from the selected model.
+                try:
+                    item["config"] = _voice_config(item["preset"], item.get("config") or {})
+                    item["preset"] = _ali_voice_preset(item["config"]["model"])
+                except ValueError:
+                    pass  # Preserve invalid legacy entries; resolve reports the error.
             # 旧版 fal.ai OmniHuman 是独立模板；设置页现在统一显示为 fal.ai。
             if item.get("preset") == "fal_omnihuman":
                 item["preset"] = "fal"
@@ -1096,6 +1196,11 @@ def upsert_entry(config: Any, entry: dict[str, Any]) -> dict[str, Any]:
         base["model"] = entry["model"]
     if entry.get("voice_id"):
         base["voice_id"] = entry["voice_id"]
+
+    if _is_ali_voice(preset):
+        existing["config"] = _voice_config(preset, base)
+        existing["preset"] = _ali_voice_preset(existing["config"]["model"])
+        existing["label"] = PRESET_UI[existing["preset"]]["label"]
 
     save_entries(config, entries)
     api_key = str(entry.get("api_key") or "").strip()
@@ -1287,7 +1392,8 @@ def test_connection(config: Any, entry_id: str, timeout_s: float = 12.0) -> dict
                 return {"ok": False, "level": "error",
                         "message": "接口可达，但权限检查返回的不是有效数据", **common}
             actual = _test_dig(parsed_body, str(assertion.get("path") or ""))
-            if "equals" in assertion and actual != assertion.get("equals"):
+            if (("equals" in assertion and actual != assertion.get("equals"))
+                    or (assertion.get("truthy") and not actual)):
                 message = str(probe.get("failure_message") or "接口可达，但模型权限未开通")
                 return {"ok": False, "level": "error", "message": message, **common}
         message = str(probe.get("success_message") or
@@ -1375,6 +1481,8 @@ def preset_options() -> list[dict[str, Any]]:
             "models": models,
             "default_model": default_model,
             "editable_model": bool(ui.get("editable_model")),
+            "fixed_model": bool(ui.get("fixed_model")),
+            "uses_source_video": cfg.get("input_media") == "video",
             "capability": _caps.capability_summary(cfg),
             "verified": bool((cfg.get("capabilities") or {}).get("verified")),
             "fields": copy.deepcopy(preset.get("fields") or []),
@@ -1427,6 +1535,8 @@ def resolve(config: Any, provider: str) -> dict[str, Any] | None:
     preset_cfg = dict((PRESETS.get(str(entry.get("preset") or ""), {})
                        .get("config") or {}))
     cfg = _deep_merge(preset_cfg, entry.get("config") or {})
+    if _is_ali_voice(str(entry.get("preset") or "")):
+        cfg = _voice_config(entry["preset"], cfg)
     return {
         "kind": kind,
         "id": entry_id,
@@ -1439,12 +1549,25 @@ def resolve(config: Any, provider: str) -> dict[str, Any] | None:
 
 def labels(config: Any) -> dict[str, str]:
     """{provider_name: 友好显示名}，给前端下拉框用。"""
-    return {entry_name(e): str(e.get("label") or e.get("id"))
-            for e in load_entries(config)}
+    result = {}
+    for entry in load_entries(config):
+        label = str(entry.get("label") or entry.get("id"))
+        if entry.get("kind") == "voice" and not str(entry.get("preset","")).startswith("aliyun_voice_"):
+            model = str((entry.get("config") or {}).get("model") or "")
+            if model:
+                label += " · " + next((m.get("label",model) for m in
+                    (PRESET_UI.get(entry.get("preset"),{}).get("models") or []) if m.get("id") == model),model)
+        result[entry_name(entry)] = label
+    return result
 
 
 def availability(config: Any, entry: dict[str, Any]) -> tuple[bool, str]:
     """条目现在能不能用，以及缺什么。"""
+    if _is_ali_voice(str(entry.get("preset") or "")):
+        try:
+            _voice_config(entry["preset"], entry.get("config") or {})
+        except ValueError as exc:
+            return False, str(exc)
     preset_cfg = dict((PRESETS.get(str(entry.get("preset") or ""), {})
                        .get("config") or {}))
     cfg = _deep_merge(preset_cfg, entry.get("config") or {})

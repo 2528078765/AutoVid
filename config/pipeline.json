@@ -6,7 +6,8 @@
     "assets_dir": "assets",
     "voice_id": "",
     "avatar_id": "",
-    "require_assets": true
+    "require_assets": true,
+    "export_mode": "source"
   },
   "platform": {
     "name": "douyin",
@@ -33,7 +34,7 @@
     },
     "voice": {
       "enabled": true,
-      "provider": "voice:voice-cosyvoice2",
+      "provider": "cloud_tts",
       "fallback": [],
       "strict": true,
       "voice": "zh-CN-XiaoxiaoNeural",
@@ -47,12 +48,12 @@
       "chars_per_second": 4.6
     },
     "visuals": {
-      "enabled": true,
+      "enabled": false,
       "provider": "ffmpeg_gradient"
     },
     "avatar": {
       "enabled": true,
-      "provider": "avatar:avatar-dashscope-wan-s2v",
+      "provider": "http_job",
       "zoom": 0.12,
       "person_placeholder": false,
       "fallback": [],
@@ -89,7 +90,7 @@
       "tag_count": 6
     },
     "publish": {
-      "enabled": true,
+      "enabled": false,
       "provider": "package",
       "platform": "douyin",
       "copy_media": true

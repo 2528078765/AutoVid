@@ -18,6 +18,17 @@ from __future__ import annotations
 # --------------------------------------------------------------------------- #
 VOICE_PROVIDERS: list[dict] = [
     {
+        "name": "阿里云百炼 · 多模型声音复刻",
+        "homepage": "https://bailian.console.aliyun.com/",
+        "docs": "https://help.aliyun.com/zh/model-studio/voice-cloning-user-guide",
+        "tags": ["音色克隆", "北京地域", "模型可选"],
+        "price": "按官方声音注册及合成用量计费，以控制台为准",
+        "why": "可选千问三、CosyVoice 3.5/3/2 与 Qwen-Audio 3.0。"
+               "CosyVoice / Qwen-Audio 需参考录音公网链接；不同模型单独注册音色，效果待试听。",
+        "supports_clone": True, "verified": False, "preset": "aliyun_voice_cosyvoice_v3_5_flash",
+        "api_shape": "根据模型选择注册和合成协议 → 缓存匹配的音色 ID → 下载音频",
+    },
+    {
         "name": "硅基流动 SiliconFlow",
         "homepage": "https://cloud.siliconflow.cn/",
         "docs": "https://docs.siliconflow.com/cn/api-reference/audio/upload-voice",
@@ -43,19 +54,6 @@ VOICE_PROVIDERS: list[dict] = [
         "verified": False,
         "preset": "minimax",
         "api_shape": "上传音频拿 file_id → 克隆建音色 → t2a_v2 合成",
-    },
-    {
-        "name": "阿里云百炼 DashScope（CosyVoice 声音复刻）",
-        "homepage": "https://bailian.console.aliyun.com/",
-        "docs": "https://help.aliyun.com/zh/model-studio/cosyvoice-clone-api",
-        "tags": ["音色克隆", "大厂", "稳定"],
-        "price": "按量计费，需实名",
-        "why": "阿里官方 CosyVoice 声音复刻，稳定性和合规性最好，"
-               "适合要长期跑的账号。需要阿里云账号实名。",
-        "supports_clone": True,
-        "verified": False,
-        "preset": "dashscope",
-        "api_shape": "创建音色 → 用音色 ID 合成（HTTP，需 DashScope API Key）",
     },
     {
         "name": "火山引擎（豆包语音）",
@@ -128,6 +126,19 @@ VOICE_PROVIDERS: list[dict] = [
 # 数字人 / 口播视频
 # --------------------------------------------------------------------------- #
 VIDEO_PROVIDERS: list[dict] = [
+    {
+        "name": "阿里云百炼 VideoRetalk",
+        "homepage": "https://bailian.console.aliyun.com/",
+        "docs": "https://help.aliyun.com/zh/model-studio/videoretalk/",
+        "tags": ["视频底片", "口型替换", "国内"],
+        "price": "文档参考 0.08元/秒，实际以官方账单为准",
+        "why": "使用自己录制的人物视频与配音替换口型，保留底片里的衣服、背景和身体动作。"
+               "不是照片生视频，也不能自动换装；已增加预设，云端实际效果尚未实测。",
+        "supports_photo": False,
+        "verified": False,
+        "preset": "dashscope_videoretalk",
+        "api_shape": "上传人物视频和配音 → 提交任务 → 查询状态 → 下载视频",
+    },
     {
         "name": "阿里云百炼 Wan2.2-S2V",
         "homepage": "https://bailian.console.aliyun.com/",

@@ -38,6 +38,7 @@ from __future__ import annotations
 import json
 import random
 import re
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, TypedDict
@@ -110,6 +111,7 @@ class FlowState(TypedDict, total=False):
     avatar_id: str
     # 本次拍摄的场景照片（带人物）—— 它提供画面与背景
     scene_photo: str
+    source_video: str
 
     # ---- 前置检查 ----
     errors: list[str]
@@ -153,6 +155,18 @@ class VideoFlow:
         self.checkpointer_kind = "unknown"
 
     # ================================================================ 基础设施
+    def _platform(self, state: FlowState) -> dict[str, Any]:
+        platform = dict(self.config.platform)
+        mode = self.config.get("project.export_mode", "configured")
+        if mode in {"portrait1080", "portrait720"}:
+            platform.update(width=1080 if mode == "portrait1080" else 720,
+                            height=1920 if mode == "portrait1080" else 1280, fps=30)
+        elif mode == "source" and state.get("source_video"):
+            info = M.probe_media(Path(state["source_video"]))
+            if info.get("has_video"):
+                platform.update(width=int(info["width"]),height=int(info["height"]),fps=float(info["fps"]))
+        return platform
+
     def _emit(self, event: dict[str, Any]) -> None:
         if self.emitter is None:
             return
@@ -227,16 +241,24 @@ class VideoFlow:
             voice_asset = store.get_voice(voice_id)
             if voice_asset is None:
                 errors.append(f"音色 {voice_id} 在资产库里不存在")
-            elif not voice_asset.ref_audio:
+            elif not voice_asset.ref_audio and not voice_asset.cloud_reference_url:
                 errors.append(f"音色「{voice_asset.name}」还没有参考音频，请先录音或上传")
-            elif store.voice_reference(voice_id) is None:
+            elif voice_asset.ref_audio and store.voice_reference(voice_id) is None:
                 errors.append(f"音色「{voice_asset.name}」的参考音频文件已丢失")
             else:
-                info["音色"] = f"{voice_asset.name}（{voice_asset.duration_s}s 参考音频）"
+                info["音色"] = f"{voice_asset.name}（{voice_asset.duration_s}s 本地参考音频）" if voice_asset.ref_audio else f"{voice_asset.name}（参考录音直链，待云端验证）"
+            if voice_asset is not None:
+                errors.extend(P.voice_setup_problems(self.config,str(self.config.provider_of("voice")),voice_asset))
 
         # ---- 形象 ----
         avatar_id = str(state.get("avatar_id") or "").strip()
-        if not avatar_id:
+        scene_only = P.avatar_uses_scene_photo(self.config, str(self.config.provider_of("avatar")))
+        video_input = P.avatar_uses_source_video(self.config, str(self.config.provider_of("avatar")))
+        if video_input:
+            info["形象"] = "来自人物视频底片，不使用独立照片，不换脸或换装"
+        elif scene_only:
+            info["形象"] = "由本次出镜照片提供，当前引擎不使用独立身份参考"
+        elif not avatar_id:
             errors.append("形象没准备好：没有选择形象参考图")
         else:
             avatar_asset = store.get_avatar(avatar_id)
@@ -252,9 +274,19 @@ class VideoFlow:
         # ---- 本次场景照片 ----
         # 这张照片提供画面和背景：形象库存的是「身份」，这里存的是「今天在哪拍」。
         scene = str(state.get("scene_photo") or "").strip()
-        if not scene:
+        source_info = None
+        if video_input:
+            from .videoretalk import validate_source
+            try:
+                source = str(state.get("source_video") or "")
+                source_info = validate_source(source)
+                info["人物视频底片"] = (f"{Path(source).name}（{source_info['duration']:.2f}秒，"
+                                         f"{source_info['width']}×{source_info['height']}）")
+            except AutoVidError as exc:
+                errors.append(str(exc))
+        elif not scene:
             errors.append(
-                "场景照片没准备好：需要一张本次拍摄的、带人物的照片"
+                "场景照片没准备好：请选择一张带人物的出镜照片，可复用已有素材"
                 "（它会成为视频的画面与背景）")
         elif not Path(scene).exists():
             errors.append(f"场景照片文件不存在：{scene}")
@@ -302,11 +334,16 @@ class VideoFlow:
         # ---- 分辨率与能力协商（**在花钱之前**说清楚）----
         # 这一步的价值在于「先知道再付钱」：D-ID 的照片数字人只能出 512×512，
         # 拉到 1080×1920 是放大约 7.9 倍。等跑完再发现画面糊，钱和时间都已经花了。
-        platform = self.config.platform
+        platform = self._platform(state)
         want_w = int(platform.get("width", 1080))
         want_h = int(platform.get("height", 1920))
         want_fps = int(platform.get("fps", 30))
         spec = P.avatar_output_spec(self.config, avatar_engine, want_w, want_h, want_fps)
+        if source_info:
+            spec = CAP.OutputSpec(width=int(source_info["width"]), height=int(source_info["height"]),
+                                  fps=round(source_info["fps"]), verified=False,
+                                  source="VideoRetalk 官方文档：与底片一致",
+                                  note="实际输出仍需云端验证")
         info["数字人输出规格"] = spec.describe()
         _, _, notes = CAP.negotiate_canvas(want_w, want_h, spec)
         warnings.extend(notes)
@@ -320,7 +357,7 @@ class VideoFlow:
                 f"要等它返回才知道。{spec.note}")
 
         img_limits = P.avatar_image_limits(self.config, avatar_engine)
-        if img_limits.min_side or img_limits.max_pixels or img_limits.formats:
+        if not video_input and (img_limits.min_side or img_limits.max_pixels or img_limits.formats):
             info["图片来源要求"] = img_limits.describe()
 
         aud_limits = P.avatar_audio_limits(self.config, avatar_engine)
@@ -567,32 +604,40 @@ class VideoFlow:
         画面与背景来自场景照片本身（拍照时的真实环境），
         形象资产提供身份参考（ComfyUI 工作流可以用它做身份一致）。
         """
-        platform = self.config.platform
+        platform = self._platform(state)
         width = int(platform.get("width", 1080))
         height = int(platform.get("height", 1920))
         fps = int(platform.get("fps", 30))
         out = self._dir(state, "avatar")
 
-        scene = Path(str(state["scene_photo"]))
-        if not scene.exists():
+        video_input = P.avatar_uses_source_video(self.config, str(self.config.provider_of("avatar")))
+        source_video = Path(str(state.get("source_video") or "")) if video_input else None
+        scene = Path(str(state.get("scene_photo") or ""))
+        if not video_input and not scene.is_file():
             raise AutoVidError(f"场景照片丢失：{scene}")
 
         store = AssetStore(self.config)
         avatar_id = str(state.get("avatar_id") or "")
-        identity = store.avatar_portrait(avatar_id) if avatar_id else None
+        scene_only = P.avatar_uses_scene_photo(self.config, str(self.config.provider_of("avatar")))
+        identity = store.avatar_portrait(avatar_id) if avatar_id and not scene_only and not video_input else None
 
         segments = [
             {**segment, "audio_path": segment["audio_file"]}
             for segment in state["voice"]["segments"]
         ]
         # visuals 参数就是「画面底图」：只有场景照片这一张（每个片段都用它）
+        kwargs = {"source_video": source_video} if video_input else {}
         clips, provider = P.avatar_render(
-            self.config, segments, [scene], out, width, height, fps, self.log,
-            portrait=identity)
+            self.config, segments, [] if video_input else [scene], out, width, height, fps, self.log,
+            portrait=identity, **kwargs)
 
         # 分辨率协商：这家实际能出什么规格，和我们要的 1080×1920 差多少。
         # 差就说清楚，让下游（和用户）知道成片是放大来的，别以为是原生高清。
         spec = P.avatar_output_spec(self.config, provider, width, height, fps)
+        if video_input and clips:
+            actual_w, actual_h, actual_fps = M.probe_video_spec(clips[0])
+            spec = CAP.OutputSpec(width=actual_w, height=actual_h, fps=round(actual_fps),
+                                  verified=True, source="本次返回视频实测", note="人物视频底片口型替换")
         canvas_w, canvas_h, output_notes = CAP.negotiate_canvas(width, height, spec)
         self.log(f"  该引擎输出规格：{spec.describe()}")
         for note in output_notes:
@@ -600,10 +645,13 @@ class VideoFlow:
 
         payload = {
             "provider": provider,
-            "scene_photo": str(scene),
+            "scene_photo": str(scene) if not video_input else "",
+            "source_video": str(source_video) if video_input else "",
+            "uses_source_video": video_input,
             "avatar_id": avatar_id or None,
             "identity_photo": str(identity) if identity else None,
             "used_portrait": identity is not None,
+            "uses_scene_photo": scene_only,
             "clips": [str(c) for c in clips],
             "output_spec": {"width": spec.width, "height": spec.height,
                             "fps": spec.fps, "aspect": spec.aspect,
@@ -612,14 +660,18 @@ class VideoFlow:
             "output_notes": output_notes,
         }
         path = self._write(state, "avatar", "avatar.json", payload)
-        self.log(f"  画面来自场景照片：{scene.name}")
+        self.log(f"  画面来自人物视频：{source_video.name}" if video_input else f"  画面来自场景照片：{scene.name}")
         return {"avatar": {**payload, "avatar_file": path},
                 "trace": self._grow(state, "avatar", "ok", provider=provider)}
 
     # ================================================================ 7. 字幕
     def node_subtitles(self, state: FlowState) -> dict[str, Any]:
         cfg = self.config.step_cfg("subtitles")
-        platform = self.config.platform
+        if not self.config.step_enabled("subtitles"):
+            self.log("  未选择添加字幕，跳过字幕生成")
+            return {"subtitles": {"enabled": False, "file": None, "events": 0},
+                    "trace": self._grow(state, "subtitles", "skipped")}
+        platform = self._platform(state)
         width = int(platform.get("width", 1080))
         height = int(platform.get("height", 1920))
         out = self._dir(state, "subtitles")
@@ -674,7 +726,7 @@ class VideoFlow:
         ass = out / "subtitles.ass"
         M.write_ass(ass, M.build_ass([main_style, keyword_style], events, width, height,
                                      title=str(script.get("topic", "AutoVid"))))
-        payload = {"file": str(ass), "events": len(events),
+        payload = {"enabled": True, "file": str(ass), "events": len(events),
                    "utterances": len(voice["utterances"])}
         self.log(f"  字幕完成：{len(events)} 条事件（一条正文 = 一口气）")
         return {"subtitles": payload,
@@ -682,7 +734,7 @@ class VideoFlow:
 
     # ================================================================ 8. 合成
     def node_compose(self, state: FlowState) -> dict[str, Any]:
-        platform = self.config.platform
+        platform = self._platform(state)
         width = int(platform.get("width", 1080))
         height = int(platform.get("height", 1920))
         out = self._dir(state, "compose")
@@ -690,13 +742,16 @@ class VideoFlow:
 
         clips = [Path(c) for c in state["avatar"]["clips"]]
         voice_wav = Path(state["voice"]["wav"])
-        ass = Path(state["subtitles"]["file"])
+        subtitles_enabled = self.config.step_enabled("subtitles")
+        ass_file = (state.get("subtitles") or {}).get("file")
+        if subtitles_enabled and (not ass_file or not Path(ass_file).is_file()):
+            raise AutoVidError("已选择添加字幕，但找不到字幕文件，请先完成字幕生成")
 
         # 尺寸/帧率对齐：云端数字人（实测 D-ID）回的是 512×512 @25fps，
         # 而正片是 1080×1920 @30fps。流拷贝拼接要求每段参数完全一致，
         # 否则拼出来是花屏或时长错乱。先探测，不一致才逐个适配画布
         # （已经一致的不重编码）。
-        fps = int(platform.get("fps", 30))
+        fps = float(platform.get("fps", 30))
         specs = {M.probe_video_spec(c) for c in clips}
         if specs - {(width, height, float(fps))}:
             self.log(f"  片段规格不一致 {sorted(specs)}，先适配到 {width}×{height}@{fps}fps…")
@@ -715,9 +770,14 @@ class VideoFlow:
         self.log("  合并音频轨…")
         merged = M.mux_audio(track, voice_wav, out / "av.mp4", cwd=out,
                              audio_bitrate=str(platform.get("audio_bitrate", "192k")))
-        self.log("  烧录字幕…")
-        final = M.burn_subtitles(merged, ass, out / "final.mp4", cwd=out,
-                                 crf=int(platform.get("crf", 20)))
+        if subtitles_enabled:
+            self.log("  烧录字幕…")
+            final = M.burn_subtitles(merged, Path(ass_file), out / "final.mp4", cwd=out,
+                                     crf=int(platform.get("crf", 20)))
+        else:
+            self.log("  不添加字幕，直接保留已合并的音视频")
+            final = out / "final.mp4"
+            shutil.copyfile(merged, final)
         self.log("  渲染封面…")
         title = (state["script"].get("title_options") or [state["script"].get("topic", "")])[0]
         font = str(cfg.get("font", "Microsoft YaHei"))
@@ -876,7 +936,7 @@ class VideoFlow:
             status = "ok"
             if isinstance(out, dict) and out.get("trace"):
                 raw = str(out["trace"][-1].get("status") or "ok")
-                status = "failed" if raw == "failed" else "ok"
+                status = raw if raw in {"failed", "skipped"} else "ok"
             self._emit({"type": "step_done", "step": name, "status": status,
                         "duration_s": round(_time.perf_counter() - started, 2)})
             return out
